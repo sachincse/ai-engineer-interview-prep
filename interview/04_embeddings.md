@@ -1,346 +1,377 @@
 # Chapter 04 — Embedding Models
-## How they're created, what makes them work, and what to pick
 
-> "Explain how an embedding model is created" — almost certain interview question for RAG-heavy roles. This chapter goes from the contrastive loss to production choice (BGE vs E5 vs OpenAI vs Cohere).
-
----
-
-## 4.1 What is an embedding model?
-
-A function **f(text) → vector ∈ ℝ^d** that maps semantically similar texts to nearby points in a d-dimensional space.
-
-```
-f("I love NLP")          → [0.12, -0.43, 0.77, ..., -0.11]     (d=768)
-f("Natural language is   → [0.11, -0.41, 0.75, ..., -0.12]     (nearby)
-    my passion")
-f("The boiler is        → [-0.82, 0.33, -0.10, ..., 0.45]      (far)
-    broken")
-```
-
-Similarity is then measured with **cosine similarity** (or dot product / Euclidean):
-
-```
-sim(a, b) = (a · b) / (||a|| · ||b||)
-```
+> **Why this chapter matters:** Almost every RAG-flavored interview question routes through embeddings. "How does an embedding model get trained?" "Why does cosine similarity work?" "When would you choose BGE over OpenAI?" These are not trivia — they test whether you understand the layer that makes semantic search work. Sachin's ResMed RAG chatbot lived or died on embedding quality, and his pgVector usage in production is the natural tie-in throughout this chapter.
 
 ---
 
-## 4.2 Architecture — an encoder with a pooling head
+## 4.1 What an embedding model actually is
 
-Modern embedding models are almost all **encoder-only transformers** (BERT-family) fine-tuned with a contrastive objective.
+### The plain-English mental model
 
-```
-   Text: "How do I reset my password?"
-         │
-    ┌────▼─────┐
-    │ Tokenizer│ → [CLS] how do I reset my password ? [SEP]
-    └────┬─────┘
-         │
-    ┌────▼─────────────────┐
-    │ Transformer Encoder  │   ← BERT / RoBERTa / DeBERTa / modern retriever
-    │   (bidirectional     │
-    │    self-attention)   │
-    └────┬─────────────────┘
-         │ hidden states H ∈ ℝ^(n × d)
-         │
-    ┌────▼─────┐
-    │  Pooling │   ← mean / CLS / weighted / last-token
-    └────┬─────┘
-         │
-    ┌────▼─────┐
-    │ Normalize│   ← L2 norm → unit vector (needed for cosine)
-    └────┬─────┘
-         ▼
-     Embedding ∈ ℝ^d
-```
+An embedding model is a function that takes a piece of text and returns a list of numbers — a vector. The magic is that this function is trained so that **texts with similar meaning produce nearby vectors**. "I love NLP" and "Natural language is my passion" come out as vectors with high cosine similarity, even though they share zero words in common. "I love NLP" and "I hate this code" come out as vectors that are far apart, even though they share three out of four words.
 
-### Pooling choices
+That property — **semantic proximity in vector space** — is the foundation of every RAG system, every semantic search, every clustering of documents. Without it, you can only do exact keyword search. With it, you can answer "find me documents about cycling training plans" with a corpus that never uses the word "cycling" but talks about "indoor riding" and "FTP intervals."
 
-- **[CLS] token** (BERT classic) — use the first special-token's hidden state. Works if you *fine-tuned* the model, less great off-the-shelf.
-- **Mean pooling** (SBERT default) — average all token hidden states, usually weighted by attention mask. Most robust.
-- **Last-token pooling** (for decoder-only embeddings like GTE-Qwen, NV-Embed) — the last token aggregated info causally.
-- **Weighted / learned pooling** — attention-based mean with learned weights.
-
----
-
-## 4.3 Contrastive Learning — the core training recipe
-
-### The intuition
-
-Push **similar** texts together; pull **dissimilar** apart. No absolute labels needed — just "these two are related, these aren't."
-
-### InfoNCE loss
-
-Given a query q, one positive p⁺, and N negatives {p_i}:
+### The block diagram
 
 ```
-L = - log [ exp(sim(q, p⁺) / τ)  /  Σᵢ exp(sim(q, pᵢ) / τ) ]
-```
-
-- sim = cosine similarity (or dot product after L2 norm)
-- τ = **temperature** (typically 0.01-0.05)
-- Sum over **in-batch negatives** + optional hard negatives
-
-It's literally a softmax cross-entropy where the "classes" are "which candidate is the positive?"
-
-### The temperature knob
-- Small τ (0.01) → sharp contrasts, learns fine distinctions but unstable
-- Large τ (0.5) → soft contrasts, under-powered gradient
-- Sweet spot: τ ≈ 0.02-0.05
-
-### In-batch negatives
-With batch size B, each of the B queries has (B-1) "free" negatives — the positives of other queries in the batch. **Bigger batch = more negatives = better training.** Which is why embedding training uses huge batches (2K-32K).
-
-### Hard negatives
-Random negatives are usually trivially separable (no gradient signal). **Hard negatives** are semantically similar-but-wrong candidates. Mining strategies:
-
-- **BM25 top-k** for a query (lexically similar, semantically may miss)
-- **Previous-model top-k** (self-supervised mining — model-as-labeler)
-- **ANCE** — async hard-negative refresh from the current model
-- **Triplet mining** — semi-hard (positives closer than negative, but within margin)
-
----
-
-## 4.4 The multi-stage training recipe (BGE, E5, GTE — 2024-2026 SOTA)
-
-```
-Stage 1: Weakly-Supervised Contrastive Pretraining
-  - Billions of pairs from web: (title, body), (Q, A), (comment, reply)
-  - High-throughput, low-quality filter
-  - Big batch (16K+ negatives)
-  - Goal: teach model "semantic closeness" broadly
-
-Stage 2: Supervised Contrastive Fine-tuning
-  - Curated: MS-MARCO, NQ, HotpotQA, FEVER, TriviaQA, etc.
-  - Hard negatives mined (BM25 + previous-model)
-  - Smaller batch, smaller LR
-  - Goal: tight retrieval performance
-
-Stage 3 (optional): Instruction Tuning
-  - Prepend task prefix: "Represent this query for retrieval:"
-  - Same model serves retrieval, classification, clustering, STS
-  - Goal: one model, many tasks (MTEB winner style)
-
-Stage 4 (optional): Distillation / Matryoshka
-  - Distill teacher into smaller student for latency
-  - Train with Matryoshka loss so truncated dims still work
-```
-
----
-
-## 4.5 Bi-Encoder vs Cross-Encoder vs ColBERT
-
-### Bi-encoder (SBERT, BGE, E5)
-```
-f(q) = vector_q      │  f(d) = vector_d      │  score = cos(vector_q, vector_d)
-```
-- Encodes query and doc **independently**
-- Pre-encode corpus; at query time, one forward pass + ANN
-- **Fast, scalable** — used for retrieval
-
-### Cross-encoder (BGE-reranker, Cohere Rerank)
-```
-g([q; d]) → score
-```
-- Encodes query AND doc **together** with full attention
-- Much higher quality, **100-1000× slower**
-- Used for **reranking** top-50 → top-5
-
-### ColBERT (late interaction)
-```
-Per-token embeddings for q (q_i) and d (d_j)
-score = Σ_i max_j (q_i · d_j)      ← MaxSim
-```
-- Keeps per-token vectors instead of one pooled vector
-- Higher accuracy than bi-encoder, much cheaper than cross-encoder
-- **Expensive storage** (one vector per token, not per doc)
-- Used when recall matters and storage is acceptable
-
-### Standard production pipeline
-
-```
-Query ──▶ Bi-encoder top-100 (fast, high recall)
+   ┌─────────────────────┐
+   │  "I love NLP"       │   raw text
+   └──────────┬──────────┘
               │
               ▼
-         Cross-encoder rerank → top-5 (high precision)
+   ┌─────────────────────┐
+   │  Tokenizer          │   split into tokens (subwords)
+   │  (BPE / WordPiece)  │   ["I", "love", "NL", "P"]
+   └──────────┬──────────┘
               │
               ▼
-           LLM answer generation
+   ┌─────────────────────┐
+   │  Token Embeddings   │   each token → 768-dim vector
+   │  (lookup matrix)    │
+   └──────────┬──────────┘
+              │
+              ▼
+   ┌─────────────────────┐
+   │  Transformer        │   contextualize tokens through
+   │  Encoder            │   self-attention layers
+   └──────────┬──────────┘
+              │
+              ▼
+   ┌─────────────────────┐
+   │  Pooling            │   reduce sequence to one vector
+   │  ([CLS], mean,      │   (most common: mean pooling
+   │   or last-token)    │    of last hidden state)
+   └──────────┬──────────┘
+              │
+              ▼
+   ┌─────────────────────┐
+   │  Optional:          │
+   │  Normalize to       │   so cosine = dot product
+   │  unit length        │
+   └──────────┬──────────┘
+              │
+              ▼
+       [0.12, -0.43, 0.77, ..., -0.11]   final embedding (e.g. d=768)
 ```
 
+The transformer encoder gives you contextualized token representations — the vector for "bank" depends on whether the surrounding text is about rivers or finance. Pooling collapses the sequence into a single vector. Mean pooling is the most common — average the last hidden states across all tokens. Some models use the [CLS] token's representation; some use the last token's; the choice depends on how the model was trained.
+
+### Why cosine similarity?
+
+Once you have unit-normalized vectors, the cosine of the angle between them is just their dot product. Cosine ranges from -1 (opposite meaning) through 0 (unrelated) to 1 (identical meaning). It works because semantically similar texts produce vectors pointing in similar directions in the high-dimensional space. We don't care about magnitude — we care about direction. Two texts can both be "long" or both be "short" and still mean very different things, so we throw away magnitude and keep only direction.
+
+The math: cosine_similarity(A, B) = (A · B) / (||A|| · ||B||). For unit vectors, the denominator is 1, so cosine equals dot product. This is why production systems normalize embeddings on the way into the vector store — once normalized, you can use the fastest possible distance metric: dot product.
+
 ---
 
-## 4.6 Matryoshka Representation Learning (MRL)
+## 4.2 How embedding models get trained — the contrastive learning story
 
-### The problem
-You train a 1024-d embedding. Storage cost at 100M vectors = 400GB. You want to cheaply truncate to 256-d but plain truncation destroys retrieval.
+### The core idea
 
-### The solution
-Train the embedding so the **first 64, 128, 256, 512, 1024 dims are each a valid embedding** — via a multi-resolution contrastive loss:
+You can't train an embedding model with a regression loss because there's no "correct vector" for a text. Instead, we use **contrastive learning**: train the model so that similar pairs get close together and dissimilar pairs get pushed apart. The model only ever sees pairs (or triplets) — it never sees absolute targets.
 
 ```
-L_MRL = Σ_d ∈ {64, 128, 256, 512, 1024}  L_InfoNCE(truncate(emb, d))
+   Anchor:    "I love NLP"
+   Positive:  "Natural language is my passion"   ← should be CLOSE
+   Negative:  "Database indexing strategies"     ← should be FAR
 ```
 
-- Each smaller prefix is forced to carry retrieval-relevant signal
-- At inference, pick the dimension that fits your storage budget
+The training objective pulls anchor-positive pairs together and pushes anchor-negative pairs apart, all simultaneously across batches of millions of triplets.
 
-### Used in
-- OpenAI `text-embedding-3-small` / `text-embedding-3-large`
-- Nomic Embed v1
-- BGE-M3 (multi-granularity)
+### Triplet loss — the simplest contrastive loss
 
-### Why MRL beats PCA on a non-MRL embedding
-PCA maximizes variance — not retrieval utility. MRL is *trained* for graceful truncation. On BEIR, MRL@256 often beats PCA@256 by 5-10 nDCG points.
-
----
-
-## 4.7 Instruction-tuned embeddings
-
-The MTEB leaderboard (Massive Text Embedding Benchmark) is dominated by models that prepend a task instruction:
+For an anchor a, positive p, and negative n, the triplet loss is:
 
 ```
-For retrieval:
-    q = "query: How do I reset my password?"
-    d = "passage: To reset your password, click..."
-
-For clustering:
-    t = "Represent the sentence for clustering: ..."
+L = max(0, ||a - p||² - ||a - n||² + margin)
 ```
 
-**Why this works:** One model learns to be task-conditional — retrieval asymmetry (query vs passage), STS symmetry, clustering, classification — all from one checkpoint.
+In plain English: penalize the model whenever the distance from anchor to positive is not at least `margin` smaller than the distance from anchor to negative. The margin (typically 0.2 to 1.0) prevents the trivial solution where everything collapses to the same point.
 
-### Families
-- **E5** (Microsoft): `"query: "`, `"passage: "`
-- **BGE** (BAAI): `"Represent this sentence for searching relevant passages: "`
-- **GTE** (Alibaba): simpler, general prefix
-- **Nomic / Jina / Mxbai**: similar instruction style
+A worked numeric example. Suppose `||a - p||² = 0.3` and `||a - n||² = 0.5`, with margin = 0.5. Then loss = max(0, 0.3 - 0.5 + 0.5) = 0.3. The model gets penalized because the positive (distance 0.3) and negative (distance 0.5) aren't separated by the full margin yet. As training progresses, the model adjusts to push the negative further away.
 
----
+### InfoNCE loss — the modern standard
 
-## 4.8 BGE-M3 — the Swiss Army knife
+Triplet loss uses one positive and one negative per anchor. InfoNCE — Information Noise Contrastive Estimation — uses one positive and many negatives, treating the problem as a classification task: among (positive + N negatives), which one is the true positive?
 
-**BGE-M3** (BAAI, 2024) is one model that emits **three kinds of embeddings** in a single forward pass:
+```
+L = -log( exp(sim(a, p) / τ) / Σᵢ exp(sim(a, xᵢ) / τ) )
+```
 
-1. **Dense vector** (1024-d) for semantic ANN
-2. **Sparse lexical** weights (like SPLADE) for BM25-style term matching
-3. **Multi-vector** (ColBERT-style) for late interaction
+where the denominator sums over the positive and all negatives, and τ is a temperature parameter (typically 0.05 to 0.1). The intuition: maximize the probability the model assigns to the true positive among all candidates. Lower temperature makes the loss sharper — the model has to be very confident about the positive.
 
-Combined via a learned weighted score. SOTA on multilingual retrieval. **Serious option for Avrioc's UAE deployment** since it handles English + Arabic + 100+ languages.
+### Where do training pairs come from?
 
----
+This is the secret sauce. The big embedding models — BGE, E5, OpenAI's text-embedding-3 — are trained on massive datasets of pairs gathered from the open web. Common sources:
 
-## 4.9 The MTEB Leaderboard — what's SOTA in 2026
+- **(query, document) pairs from search engines** — the document the user clicked is the positive.
+- **(question, answer) pairs** from forums like StackOverflow and Reddit.
+- **(title, abstract) pairs** from scientific papers.
+- **(paragraph_a, paragraph_b)** pairs from the same document — semantically related by document context.
+- **Cross-lingual pairs** — same text in different languages — for multilingual embeddings.
+- **Synthetically generated pairs** — an LLM rewrites a passage in a different style; the original and rewrite are a positive pair.
 
-(Moving target — check the live leaderboard before interviews.)
+The biggest models are trained on hundreds of millions to billions of such pairs, often with multi-stage pipelines (weak supervision pretraining → high-quality supervised fine-tuning → task-specific instruction tuning).
 
-| Tier | Model | Dim | Strengths |
-|------|-------|-----|-----------|
-| Frontier open | BGE-M3, E5-Mistral-7B, NV-Embed-v2 | 1024-4096 | Top MTEB, multilingual |
-| Balanced | BGE-large-en-v1.5, BGE-M3, GTE-large | 1024 | Quality/cost |
-| Fast | BGE-small-en-v1.5, all-MiniLM-L6-v2 | 384 | Real-time, edge |
-| Closed | OpenAI text-embedding-3-large, Cohere Embed v3, Voyage AI | 256-3072 | Managed, strong baseline |
+### Hard negative mining — the quality lever
 
-### Picking one — decision rules
+Random negatives are too easy. If your anchor is about cycling and your random negative is about quantum physics, the model learns nothing — they were already obviously different. The technique that improves embedding models most is **hard negative mining**: for each anchor, find negatives that are *almost* relevant but not quite. For an anchor "best indoor cycling trainer," a hard negative might be "best running treadmill review" — same shape of query, different domain. Hard negatives force the model to learn fine-grained distinctions.
 
-| Constraint | Recommendation |
-|-----------|----------------|
-| Need Arabic + English (UAE) | **BGE-M3** or **Cohere Embed v3 multilingual** |
-| Must stay on-prem (data residency) | BGE / E5 / GTE (Apache-2) |
-| Latency-critical | BGE-small or all-MiniLM-L6-v2 |
-| Best quality, money-no-object | NV-Embed-v2 or OpenAI text-embedding-3-large |
-| Want truncatable | OpenAI text-embedding-3 or BGE-M3 |
-| Need hybrid (sparse+dense) | BGE-M3 (built-in) or SPLADE |
+In practice, hard negatives come from:
+- **In-batch negatives**: other examples in the same training batch.
+- **Mined negatives**: documents that were retrieved by the current model but labeled as not relevant.
+- **Adversarial negatives**: paraphrases generated by an LLM that flip the meaning.
 
 ---
 
-## 4.10 Evaluation — how do you know an embedding is good?
+## 4.3 The model landscape — what to use when
 
-### Intrinsic
-- **STS-B** — sentence-pair similarity correlation with human ratings
-- **MTEB** — comprehensive: retrieval, classification, clustering, reranking, STS, summarization
+### The major open-source families
 
-### Extrinsic (retrieval)
-- **Recall@k** — did the right doc make top-k?
-- **nDCG@k** — ranking quality
-- **MRR** — position of first relevant
-- **Hit@k** — any relevant in top-k?
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │             Open-source embedding model families             │
+   ├──────────────────────────────────────────────────────────────┤
+   │                                                              │
+   │  Sentence-BERT (SBERT) — UKP Lab, the original family.       │
+   │   Pre-2023 era. Models like all-MiniLM-L6-v2, all-mpnet.     │
+   │   Still good baselines.                                      │
+   │                                                              │
+   │  BGE (BAAI General Embedding) — Beijing Academy of AI.       │
+   │   Strong English + Chinese performance. bge-large-en-v1.5    │
+   │   was state of the art for much of 2023-2024.                │
+   │                                                              │
+   │  E5 (Embedding from bidirEctional Encoder rEpresentations)   │
+   │   — Microsoft. e5-large-v2, multilingual-e5-large.           │
+   │   Strong general-purpose performance.                        │
+   │                                                              │
+   │  Nomic / Jina — embeddings designed for long context         │
+   │   (8K+ tokens) and multimodal (text+image).                  │
+   │                                                              │
+   │  Voyage / Cohere — commercial, often best-in-class on        │
+   │   benchmark leaderboards but you pay per token.              │
+   │                                                              │
+   │  OpenAI text-embedding-3 — small (1536d) and large (3072d).  │
+   │   Strong, consistent, expensive. Good default for hosted     │
+   │   workloads.                                                 │
+   └──────────────────────────────────────────────────────────────┘
+```
 
-### Domain-specific evaluation matters
-MTEB is general; your data may be medical, legal, or financial. **Always build a labeled in-domain eval set** (100-500 (query, relevant doc) pairs) before picking a model. A top-MTEB model can lose to a smaller domain-specific one on your corpus.
+### The choice matrix
 
----
+| Concern | Recommendation |
+|---------|----------------|
+| English-only, self-hosted, max quality | `bge-large-en-v1.5` or `e5-large-v2` |
+| Multilingual (Arabic, Hindi, etc.) | `multilingual-e5-large` or `bge-m3` |
+| Hosted API, no infra to manage | OpenAI `text-embedding-3-large` or Voyage |
+| Long context (4K-32K tokens) | `nomic-embed-text-v1.5` or Jina embeddings v3 |
+| Tight latency budget, low-resource | `all-MiniLM-L6-v2` (384d, very fast) |
+| Code search | `voyage-code-2`, OpenAI embedding 3 (with code prompts) |
+| Domain-specific (clinical, legal, finance) | Fine-tune a base model on domain pairs — see §4.5 |
 
-## 4.11 Interview Q&A — Embeddings
+### Dimensions and storage
 
-**Q1. How is a modern embedding model trained?**
-> Two-stage contrastive. Stage 1 — weakly-supervised on billions of (query, positive) pairs mined from web. Stage 2 — supervised fine-tuning on MS-MARCO / NQ with mined hard negatives. Optional: instruction tuning (prefix-based), distillation, Matryoshka.
+The dimension d is a critical decision because storage scales linearly with d. For one million documents:
 
-**Q2. Explain InfoNCE loss.**
-> Softmax cross-entropy over (positive + many negatives). `L = -log(exp(sim(q,p+)/τ) / Σ exp(sim(q,pi)/τ))`. Temperature τ controls contrast sharpness. Uses in-batch negatives + mined hard negatives.
+| Model | d | Storage (FP32) | Storage (FP16) |
+|-------|---|----------------|----------------|
+| MiniLM | 384 | 1.5 GB | 0.75 GB |
+| BGE-large | 1024 | 4 GB | 2 GB |
+| E5-large | 1024 | 4 GB | 2 GB |
+| OpenAI text-embedding-3-large | 3072 | 12 GB | 6 GB |
 
-**Q3. Why hard negatives are critical.**
-> Random negatives are trivially separable (near-zero gradient). Hard negatives — semantically similar but not relevant — force fine-grained discrimination. BM25 top-k, previous-model top-k, and ANCE are standard mining approaches.
-
-**Q4. Bi-encoder vs Cross-encoder — when each?**
-> Bi-encoder encodes independently, pre-indexable, millisecond latency per query. Cross-encoder encodes (q, d) jointly — 100-1000× slower but far more accurate. Standard: bi-encoder top-100, cross-encoder rerank top-5.
-
-**Q5. What is ColBERT's MaxSim?**
-> Per-token embeddings for query and doc. Score = Σ_i max_j (q_i · d_j) — each query token finds its best-matching doc token; sum across query. Fine-grained term-level relevance at a fraction of cross-encoder cost but heavy storage.
-
-**Q6. Matryoshka embeddings — what and why?**
-> Train one model whose first d' ≤ d dims are themselves a valid embedding, for multiple d' simultaneously. Lets you truncate to 256-d for cheap storage with minimal accuracy loss — MRL@256 beats PCA@256 on non-MRL embeddings by 5-10 nDCG.
-
-**Q7. What is instruction-tuned embedding?**
-> Model prepends a task prefix ("query: …", "passage: …", "Represent for clustering: …") so one checkpoint serves retrieval, classification, clustering, STS. BGE, E5, GTE all do this.
-
-**Q8. BGE-M3 — what makes it special?**
-> One model emits three outputs in a single pass: dense vector, sparse lexical weights (SPLADE-style), and multi-vector (ColBERT-style). Combined via learned weights. SOTA multilingual, including Arabic.
-
-**Q9. [Gotcha] Cosine similarity 0.92 retrievals but RAG answers are wrong. Why?**
-> Cosine measures *similarity*, not *answer relevance*. A question and its answer are often asymmetric — symmetric STS models pull paraphrases, miss query-passage relationships. Fix: asymmetric retrieval model (E5 query/passage, BGE), and add a cross-encoder reranker.
-
-**Q10. What's the difference between symmetric and asymmetric retrieval?**
-> Symmetric: query and doc share the same encoder/prompt (STS, paraphrase mining). Asymmetric: queries are short questions, docs are long passages — encode with different instructions. Most real-world retrieval is asymmetric.
-
-**Q11. How do you evaluate a new embedding model on your data?**
-> Build a 100-500 labeled (query, relevant doc) set. Measure recall@10, nDCG@10 on it. Compare against baseline (BM25 + current model). Check MTEB as a general sanity, but in-domain eval is the ground truth.
-
-**Q12. [Gotcha] What's the risk of choosing a high-dim embedding?**
-> Linear storage cost in dim, quadratic cost for some indices (HNSW), slower similarity computations. A 3072-d OpenAI model at 100M vectors ≈ 1.2 TB before any index overhead. Matryoshka or simple truncation-trained models mitigate.
-
-**Q13. Hybrid search (dense + sparse) — why and how?**
-> Dense captures semantics; sparse (BM25, SPLADE) captures exact term matches (product codes, rare names). Fuse scores with RRF (reciprocal rank fusion) or weighted sum. Wins on mixed-intent queries. BGE-M3 bakes this in.
-
-**Q14. [Gotcha] Can you fine-tune an embedding model on your data?**
-> Yes, with contrastive fine-tuning. Needs (query, positive) pairs; hard negatives are a huge lever. Libraries: sentence-transformers, InfiNity, Nomic's API. Risk: overfitting on a small set and losing generalization — usually better to try a domain-specific public model first.
-
-**Q15. RAG is hallucinating even with high-cosine retrieved docs. Debug checklist?**
-> (1) Retrieval: are the *right* docs actually in top-10? Check against labeled set. (2) Embedding symmetry: using a symmetric model for an asymmetric task? Swap to E5/BGE. (3) Missing BM25: add hybrid search. (4) Reranker: are you reranking with a cross-encoder? (5) Chunking: is the right info even in one chunk, or split across chunks? (6) Prompt: is the LLM ignoring the context?
-
-**Q16. What is SPLADE?**
-> SParse Lexical AnD Expansion — learns a sparse token-weight representation that functions like BM25 but with query/doc expansion. Uses MLM + a sparsity regularizer. Combines well with dense retrieval in hybrid search.
-
-**Q17. Vector normalization — does it matter?**
-> If you're using cosine similarity, you MUST L2-normalize. If dot product, normalization makes it equivalent to cosine; without it, vector magnitudes influence scores (usually not what you want). Most embedding libs normalize by default — check.
-
-**Q18. Can decoder-only LLMs be used as embedding models?**
-> Yes. Mount a last-token pool + contrastive fine-tune. NV-Embed-v2, GTE-Qwen, E5-Mistral-7B, Linq-Embed-Mistral — all decoder-only. Quality is SOTA on MTEB but inference is expensive (7B params vs 110M for BGE-large).
-
-**Q19. How do embedding models handle code vs natural language?**
-> Code-specific models (CodeBERT, GraphCodeBERT, UnixCoder, Jina Code) are trained on code corpora with AST-aware objectives. For mixed text-and-code retrieval, general multilingual models (BGE-M3, Voyage-code-2) often suffice.
-
-**Q20. Explain asymmetric search in one line.**
-> Queries and documents have different shapes — a short question and a long paragraph — so you encode them with different prompts, not the same prompt.
+With product quantization (Chapter 8) you can compress 8-32x further, but you pay in recall. The dimensional trade-off: higher d generally improves retrieval quality up to a point, but indexing and querying become slower. Pick d to match your corpus size and latency budget.
 
 ---
 
-## 4.12 Resume tie-ins
+## 4.4 Matryoshka representation learning — the variable-dimension trick
 
-- **"RAG-based knowledge-base chatbot using LLMs and RAG"** — be precise on your embedding choice. "We evaluated text-embedding-3-small and BGE-large on a 500-pair labeled medical QA set; chose X because..."
-- **"NER-based lender entity extraction"** — though a classification task, you likely fine-tuned a BERT-family encoder. Same architecture family as embedding models; connect them.
-- **"Snowflake feature store"** — for real-time embedding retrieval you'd want an online feature store + vector DB. Be ready to discuss the latency budget for the full retrieve-embed-search chain.
+### The motivation
+
+Suppose you trained a 1024-dim embedding model, but your production system only has memory for 256 dims. Naively truncating to the first 256 dims usually destroys quality, because the model never learned that the first 256 dims should be self-sufficient.
+
+Matryoshka Representation Learning, named after Russian nesting dolls, trains the model so that **truncating to any prefix of the vector still yields a good embedding**. The first 64 dims encode the coarsest semantic distinctions, the next 64 add finer granularity, and so on up to the full dimension.
+
+### How it works
+
+During training, the loss is computed at multiple dimensions simultaneously — typically [64, 128, 256, 512, 768, 1024] — and the gradients flow back through all of them. The model learns that the first k dims, for any k in that list, must be a usable embedding. The result: at inference time you can truncate the vector to fit your memory budget without retraining.
+
+```
+   Full embedding:     [0.12, -0.43, 0.77, 0.31, -0.05, ..., -0.11]   1024 dims
+                       ←──────64──────→
+                       ←──────────128──────────→
+                       ←──────────────256──────────────→
+                       ←──────────────────────512──────────────────→
+                       ←──────────────────────────────1024──────────────────────────────→
+
+   Each prefix is a self-sufficient embedding with monotonically improving quality.
+```
+
+OpenAI's `text-embedding-3-large` is Matryoshka-trained — you can truncate to 256 dims with a 30 percent quality drop instead of the 80 percent drop you'd get with a non-Matryoshka model.
+
+### Why this matters in production
+
+1. **Tiered storage**: store full 1024 dims in cold storage for re-ranking, but only top-256 in hot Redis cache for first-pass retrieval.
+2. **Adaptive precision**: high-traffic users get 256d retrieval; premium users get 1024d retrieval, both using the same index.
+3. **Quantization**: combining Matryoshka truncation with PQ compression gives you 50-100x storage savings with manageable quality loss.
 
 ---
 
-Continue to **[Chapter 05 — LLM Parameter Tuning](05_parameter_tuning.md)**.
+## 4.5 Fine-tuning embedding models for your domain
+
+### When fine-tuning is worth it
+
+Off-the-shelf embeddings are great for general English. They struggle on:
+
+- **Specialized vocabulary**: clinical terms (ResMed!), legal citations, financial instruments.
+- **Domain-specific similarity**: in clinical context, "stage III" and "stage IV" cancer should be similar but distinct; a generic model collapses them as "cancer staging."
+- **Style/tone matching**: matching customer support tickets across paraphrases.
+
+Sachin's ResMed RAG chatbot was a textbook fine-tuning use case. Generic embeddings on raw clinical text gave context precision around 60%; even simple section-aware chunking moved that to 80%. A domain-fine-tuned embedding could plausibly push it past 90%.
+
+### The fine-tuning pipeline
+
+```
+   ┌────────────────┐
+   │  Base model    │   e.g. bge-large-en-v1.5
+   │  (pretrained)  │
+   └───────┬────────┘
+           │
+           ▼
+   ┌────────────────┐
+   │  Domain pairs  │   (query, relevant_doc) pairs from
+   │  collection    │   logs, expert labels, synthetic data
+   └───────┬────────┘
+           │
+           ▼
+   ┌────────────────┐
+   │  Hard negative │   for each query, mine negatives from
+   │  mining        │   the corpus that look-similar-but-aren't
+   └───────┬────────┘
+           │
+           ▼
+   ┌────────────────┐
+   │  Contrastive   │   InfoNCE loss with mined negatives,
+   │  fine-tuning   │   typically 1-3 epochs at small LR
+   └───────┬────────┘
+           │
+           ▼
+   ┌────────────────┐
+   │  Eval on held- │   measure retrieval@k and MRR on a
+   │  out queries   │   golden eval set BEFORE deploying
+   └────────────────┘
+```
+
+Tooling: `sentence-transformers` library has great fine-tuning utilities. For larger fine-tunes, MTEB benchmark scripts and the HuggingFace ecosystem.
+
+A key pitfall: fine-tuning on too-small a dataset overfits and breaks the general-domain capability. Always measure both domain quality and general-domain regression before deploying.
+
+---
+
+## 4.6 ColBERT — late interaction for high-precision retrieval
+
+### Why ColBERT is different
+
+Standard "bi-encoder" embedding models reduce a document to **one vector**. ColBERT (Contextualized Late Interaction over BERT) keeps **one vector per token**. So a 100-token document produces a (100 × 128) tensor, not a 768-dim vector.
+
+```
+   Standard bi-encoder:
+   "The cat sat"  →  [0.1, 0.5, ..., -0.2]   one 768-dim vector
+
+   ColBERT:
+   "The cat sat"  →  ┌─────────────────────┐
+                     │ The   [0.1, ..., 0.4] │
+                     │ cat   [0.3, ...,-0.1] │
+                     │ sat   [0.2, ..., 0.5] │   100×128 matrix
+                     │ ...                   │
+                     └─────────────────────┘
+```
+
+At query time, ColBERT computes a **MaxSim** score: for each query token, find the most similar document token, sum up those max similarities. This "late interaction" gives much finer-grained matching — you can find a document because of one specific token-level match, not just because the document gist is similar.
+
+### The trade-off
+
+ColBERT is dramatically more accurate for fine-grained retrieval — typically 10-20% better than bi-encoders on TREC and MS MARCO benchmarks. It's also dramatically more expensive in storage (100x more vectors per document) and slower at query time (MaxSim across all tokens). For most production systems the bi-encoder + reranker combo gets you 90% of ColBERT's quality at 1% of the cost.
+
+When ColBERT wins: small, high-precision corpora where re-ranker latency is unacceptable. Large legal databases. Enterprise search where every millisecond of recall matters.
+
+---
+
+## 4.7 Embedding model gotchas in production
+
+### 1. Embedding model versioning is real
+
+If you upgrade your embedding model from BGE-v1 to BGE-v1.5, **all your stored embeddings are now stale** — they're in the old model's vector space, and queries from the new model will retrieve garbage. You must re-embed your entire corpus on every model upgrade. For 100M documents, that's a non-trivial batch job.
+
+The mitigation: version your embeddings explicitly in the database. `embeddings_bge_v1`, `embeddings_bge_v1_5`. Run new and old versions in parallel during transition. Use feature flags to switch query traffic.
+
+### 2. Asymmetric query/document embeddings
+
+Some models — notably E5 and BGE — were trained with explicit prefixes: queries get prepended with `"query: "` and documents with `"passage: "`. Forgetting these prefixes at inference time degrades retrieval quality silently by 10-20%. Always check the model card.
+
+```python
+# CORRECT for E5
+query_emb = model.encode("query: best indoor trainer")
+doc_emb = model.encode("passage: The MyWhoosh smart trainer ...")
+
+# WRONG — same model, no prefixes — will silently underperform
+query_emb = model.encode("best indoor trainer")
+doc_emb = model.encode("The MyWhoosh smart trainer ...")
+```
+
+### 3. Tokenization mismatches in non-English text
+
+Generic English-trained embedding models have shrunken vocabularies for non-Latin scripts. Arabic, Chinese, and Korean queries get split into many more tokens, often hitting the model's max-token limit (typically 512) on short text. For Avrioc's Comera and Labaiik (multilingual UAE products), `multilingual-e5-large` or `bge-m3` is the right choice.
+
+### 4. Mean pooling vs CLS pooling
+
+The model card tells you which pooling strategy was used during training. Using the wrong one at inference time silently degrades quality. Sentence-Transformers handles this automatically via `model.encode()` — if you're calling the underlying transformer directly with `model(input)`, you have to apply the correct pooling yourself.
+
+### 5. Batch normalization quirks
+
+Embedding models trained with InfoNCE-style losses are normalized to unit length by design. If you store unnormalized embeddings, your "cosine similarity" computation becomes meaningless. Always normalize at the boundary — at write time before storing, and at query time before search.
+
+---
+
+## 4.8 Resume tie-in box
+
+> Sachin's ResMed RAG-powered clinical chatbot used pgVector for storage and retrieval. The narrative for the interview should hit these points:
+>
+> 1. **The choice of pgVector**: "We were already on Postgres for transactional data, so adding pgVector kept the operational surface area small — no new infra to maintain."
+> 2. **The embedding model**: "Started with a generic open-source bi-encoder, eventually moved to a domain-aware fine-tune trained on (query, retrieved_clinical_section) pairs from production logs."
+> 3. **Section-aware chunking**: "The single biggest quality win was respecting clinical section boundaries — Findings, Impressions, Recommendations — rather than naive token-based chunking. Pushed context precision from ~60% to over 80%."
+> 4. **The retrieval pipeline**: "pgVector for first-pass retrieval (top-20), then a cross-encoder reranker for top-5 final selection. Faithfulness and answer-relevance metrics in RAGAS dictated when to add stages."
+> 5. **Versioning**: "We versioned embeddings in the database explicitly because we knew model upgrades would mean re-embedding the whole corpus."
+
+---
+
+## 4.9 Interview Q&A with full narrative answers
+
+### Q. How does an embedding model get trained?
+
+The training is contrastive. The model never sees a "correct embedding" for a text — instead, it sees pairs of texts and learns to push similar pairs together while pulling dissimilar pairs apart in the vector space. The training data is enormous — hundreds of millions of (query, document) pairs harvested from search logs, (question, answer) pairs from QA forums, (title, abstract) pairs from scientific papers, and so on. The loss function is typically InfoNCE, which treats each batch as a classification problem: among one positive and many negatives, identify the true positive. Quality comes from hard negative mining, where the model is shown negatives that are almost-but-not-quite relevant, forcing it to learn fine-grained distinctions. Modern models like BGE and E5 use multi-stage pipelines — weak supervision pretraining followed by high-quality supervised fine-tuning followed by instruction tuning for specific tasks like retrieval versus classification.
+
+### Q. Why does cosine similarity work for embeddings?
+
+Because embedding models are trained so that semantically similar texts produce vectors pointing in similar directions in the high-dimensional space. We don't care about magnitude — two texts can both be long or both short and still mean very different things — we care only about direction. Cosine similarity measures exactly that, the cosine of the angle between two vectors. If we normalize the vectors to unit length first, cosine similarity becomes simply the dot product, which is the fastest possible distance metric on modern GPUs. Production systems normalize embeddings on the way into the vector store specifically so they can use dot product at query time.
+
+### Q. When would you fine-tune an embedding model versus using off-the-shelf?
+
+Off-the-shelf models are great for general English content. They struggle on three specific problem shapes. First, specialized vocabulary — clinical text, legal citations, finance — where domain terms aren't well represented in general training data. Second, domain-specific similarity — in clinical context, "stage III" and "stage IV" cancer should be related but distinct, but a generic model often collapses them as "cancer staging." Third, style or tone matching, where you want to match across paraphrases that share semantic content but differ in surface form. The fine-tuning recipe is contrastive on domain pairs from production logs, with hard negative mining from the corpus, evaluated against a held-out set so you catch general-domain regressions. At ResMed, we considered domain fine-tuning seriously — the chunking improvements got us most of the way there, but a domain-tuned embedding would have been the next step.
+
+### Q. What is Matryoshka representation learning?
+
+Matryoshka, named after Russian nesting dolls, is a training technique that teaches an embedding model to be useful at multiple dimensions simultaneously. During training, the loss is computed at several truncation lengths — say 64, 128, 256, 512, 1024 dimensions — and gradients flow back through all of them. The result is that you can truncate the vector to any of those prefix lengths at inference time without retraining, and the truncated version is still a usable embedding. OpenAI's text-embedding-3 is Matryoshka-trained, which is why you can configure `dimensions=256` on their API and lose only 30% quality instead of the 80% you'd get from naive truncation. In production this enables tiered storage strategies — hot Redis cache holds 256-dim embeddings for first-pass retrieval, cold storage holds the full 1024-dim for reranking.
+
+### Q. How do you decide between bi-encoders and ColBERT?
+
+Bi-encoders give you one vector per document and one vector per query, then compare them with cosine similarity — fast, scalable to billions of documents, but they reduce the document to a single point. ColBERT keeps one vector per token, then computes MaxSim at query time — for each query token, find the most similar document token, sum the max similarities. ColBERT is much more accurate for fine-grained matching — typically 10-20% better on standard benchmarks — but it costs 100x more in storage and is slower at query time. The pragmatic production choice is bi-encoder for first-pass retrieval (top-20 from millions of documents) plus a cross-encoder reranker for the top-5 (does the slow but accurate matching only on a handful of candidates). That bi-encoder + reranker stack gets you most of ColBERT's quality at 1% of its cost.
+
+### Q. What would you check first if RAG retrieval quality drops in production?
+
+Five things in order. First, has the corpus changed — are you indexing new documents that weren't part of your eval set? Second, has the query distribution changed — is there a new product launch sending queries the model wasn't tuned for? Third, has the embedding model itself been silently upgraded — vendors push minor version bumps that change the vector space, breaking previously-stored embeddings. Fourth, is there a tokenization issue with non-English queries — Arabic queries hitting English-trained models can lose meaning fast. Fifth, has the chunking changed upstream — even small changes to chunk boundaries can shift retrieval quality by 10%. The production hygiene that catches all five is offline RAGAS evaluation on a frozen golden set, run nightly, alerting on any metric regression.
+
+---
+
+End of Chapter 04. Continue to **[Chapter 05 — Parameter Tuning](05_parameter_tuning.md)** or back to **[Chapter 00 — Master Index](00_index.md)**.
