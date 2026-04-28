@@ -46,8 +46,19 @@ This is a **18-chapter interview-preparation pack** (~100+ printed pages). Every
 | 16 | [System Design Interviews](16_system_design.md) | 8 | Real-time inference, RAG at scale, LLM chatbot, recommender |
 | 17 | [Behavioral, HR, UAE Relocation](17_behavioral_hr.md) | 5 | STAR answers, UAE-specific, salary, visa, culture |
 | 18 | [Cheatsheets — Formulas, Commands, Numbers](18_cheatsheet.md) | 3 | Last-minute revision reference |
+| 19 | [Avrioc Company Intel](19_avrioc_company_intel.md) | 6 | **NEW.** Avrioc's products (MyWhoosh, Comera, Labaiik, Hyre), confirmed interview pattern, reverse-chronology drill |
+| 20 | [Live Coding Bank](20_live_coding_bank.md) | 8 | **NEW.** DS&A patterns (rotate array, sliding window, LRU) + ML coding (attention, FastAPI streaming, Ray Serve) |
+| 21 | [Slurm + DGX + HPC stack](21_slurm_dgx_hpc.md) | 5 | **NEW.** Slurm sbatch scripts, NVIDIA DGX networking, Slurm↔K8s bridging |
+| 22 | [48-Hour Intensive Study Plan](22_2day_study_plan.md) | 4 | **NEW.** Hour-by-hour Tue→Thu schedule (Apr 28–30) for the actual interview |
+| 23 | [High-Probability Q&A Bank](23_high_probability_qa.md) | 8 | **NEW.** 40 likely questions tuned to Avrioc JD with model answers tied to your resume |
 
-**Total: ~130 pages** of focused, depth-first content.
+**Total: ~160 pages** of focused, depth-first content.
+
+---
+
+## Recent additions (2026-04-28)
+
+Chapters 19–23 were added the day **research surfaced Avrioc-specific intelligence** (parent of MyWhoosh/Comera/Labaiik/Hyre, confirmed reverse-chronology pattern, Slurm+DGX gap). **Read these first if your interview is imminent** — Chapter 22 has the 48-hour plan.
 
 ---
 
@@ -201,7 +212,11 @@ Time this at home — should land at 55-65 seconds. Memorize the first 10 and la
 
 ---
 
-## 6. How to use this pack (last 14 days)
+## 6. How to use this pack
+
+> **If you have <72 hours**: jump to **[Chapter 22 — 48-Hour Study Plan](22_2day_study_plan.md)** instead of the 14-day version below.
+
+### Last 14 days (original plan)
 
 | Day | Focus |
 |-----|-------|
