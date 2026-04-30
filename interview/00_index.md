@@ -77,8 +77,9 @@
 | 35 | [n8n Workflow Automation + AI Consulting](35_n8n_ai_consulting.md) | 14 | **NEW.** n8n architecture, build vs buy, discovery sessions, common AI opportunity patterns, playbooks, coaching, ROI |
 | 36 | [Fintech AI Compliance](36_fintech_ai_compliance.md) | 13 | **NEW.** BaFin, FCA, GDPR (Article 22), MiFID II, DORA, EU AI Act, scenarios |
 | 37 | [Upvest Company Intel & Applied AI Role](37_upvest_company_intel.md) | 11 | **NEW.** Company-specific prep for Upvest Applied AI role — products, role analysis, 12 Q&A, 30-60-90 plan |
+| 38 | [Lambda Cold-Start Mitigation for ML](38_lambda_cold_start_ml.md) | 14 | **NEW.** The three phases, model-class-specific strategies, PC sizing, multi-stage Dockerfiles, ONNX/INT8 for transformers, EFS mounts, when to leave Lambda |
 
-**Total: ~340 pages** across 37 chapters.
+**Total: ~355 pages** across 38 chapters.
 
 ### Chapters by company
 
