@@ -1,17 +1,29 @@
-# Interview Preparation — Sachin Singh
-## Avrioc Technologies | AI Engineer | Abu Dhabi (Onsite)
+# AI Engineering Interview Preparation Library
 
-> **Candidate:** Sachin Singh — AI Engineer | ML Solutions Architect | MLOps & LLMOps Expert
-> **Role:** AI Engineer, Avrioc Technologies, Abu Dhabi (Onsite, Permanent, Visa Sponsorship)
-> **Hiring Manager Contact:** Wilma Herron (HR Leader)
-> **Interview Date (target):** 2026 Q2
-> **Experience:** 8+ years (TrueBalance, ResMed, Tiger Analytics, Sopra Steria)
+> **Purpose:** A general-purpose interview prep library for senior AI / ML / LLMOps engineering roles. The technical chapters (01–18, 20–36) are vendor-neutral and apply to any AI engineering interview at any company. The company-specific chapters (19, 37) demonstrate how to research and prepare for a particular target — examples included for Avrioc Technologies (Abu Dhabi, AI Engineer) and Upvest (Berlin, Applied AI). Add a new company-intel chapter when targeting a new company; the rest of the library carries over.
+>
+> **Maintained by:** Sachin Singh — AI Engineer | ML Solutions Architect | MLOps & LLMOps Expert. 8+ years across TrueBalance, ResMed, Tiger Analytics, Sopra Steria. Resume tie-ins throughout the library reference these projects, but the technical content is general.
 
 ---
 
-## How this document is organized
+## How to use this library
 
-This is a **18-chapter interview-preparation pack** (~100+ printed pages). Every resume bullet, every JD line item, and every "must-know" concept for a Senior AI/LLMOps Engineer is covered with:
+### If you're prepping for a specific company
+
+1. **Start with the company-intel chapter** (19 for Avrioc, 37 for Upvest, or write your own using those as templates).
+2. **Map the JD's keywords** to the technical chapters most relevant.
+3. **Read those chapters carefully** — they're the foundation.
+4. **Drill the relevant Q&A and live-coding chapters** (20, 23) closer to the date.
+5. **Read the chosen 48-hour study plan** (22) the night before.
+
+### If you're prepping generally
+
+1. Read the foundations (01–18) over a multi-week study schedule.
+2. Pick the system-design chapters (16, 28, 30, 31, 33) most aligned with the role types you're targeting.
+3. Drill the Q&A bank (23) regularly until the answers feel native.
+4. Re-read the cheatsheet (18) on interview mornings.
+
+### Every chapter follows the same structure
 
 - **Conceptual explanation** — plain English, first principles
 - **Block diagrams** — ASCII / Mermaid diagrams you can sketch on a whiteboard
@@ -61,8 +73,20 @@ This is a **18-chapter interview-preparation pack** (~100+ printed pages). Every
 | 31 | [DAWN ResMed Chatbot System](31_dawn_chatbot_system.md) | 18 | **NEW.** Dual-mode (anonymous RAG + authenticated code execution), prompt injection defense, sandbox isolation, numerical fidelity, HIPAA compliance |
 | 32 | [Claude Deep Dive + Solution Architect Cert](32_claude_workspace_and_certification.md) | 17 | **NEW.** TrueBalance ML workspace architecture, Claude API vs OpenAI, tool design, prompt caching, certification scenarios |
 | 33 | [More System Design Cases](33_more_system_designs.md) | 14 | **NEW.** Customer support agent, e-commerce recommender, enterprise RAG, code review copilot, multi-modal search, fraud detection |
+| 34 | [MCP (Model Context Protocol) Deep Dive](34_mcp_deep_dive.md) | 14 | **NEW.** What MCP is, architecture, transports, building servers and clients, enterprise patterns, security |
+| 35 | [n8n Workflow Automation + AI Consulting](35_n8n_ai_consulting.md) | 14 | **NEW.** n8n architecture, build vs buy, discovery sessions, common AI opportunity patterns, playbooks, coaching, ROI |
+| 36 | [Fintech AI Compliance](36_fintech_ai_compliance.md) | 13 | **NEW.** BaFin, FCA, GDPR (Article 22), MiFID II, DORA, EU AI Act, scenarios |
+| 37 | [Upvest Company Intel & Applied AI Role](37_upvest_company_intel.md) | 11 | **NEW.** Company-specific prep for Upvest Applied AI role — products, role analysis, 12 Q&A, 30-60-90 plan |
 
-**Total: ~290 pages** of focused, depth-first content.
+**Total: ~340 pages** across 37 chapters.
+
+### Chapters by company
+
+If you're prepping for a specific target, use these as starting points (and the rest of the library as supporting depth):
+
+- **Avrioc Technologies (Abu Dhabi, AI Engineer)** — Chapter [19](19_avrioc_company_intel.md) for company intel, [22](22_2day_study_plan.md) for the 48-hour plan, [23](23_high_probability_qa.md) for Avrioc-tuned Q&A.
+- **Upvest (Berlin, Applied AI)** — Chapter [37](37_upvest_company_intel.md) for company intel, [34](34_mcp_deep_dive.md) for MCP (the Upvest JD's first responsibility), [35](35_n8n_ai_consulting.md) for n8n + AI consulting (Upvest JD-named), [36](36_fintech_ai_compliance.md) for BaFin/FCA/GDPR.
+- **Other companies** — copy the structure of [19](19_avrioc_company_intel.md) or [37](37_upvest_company_intel.md) as a template; rest of the library applies as-is.
 
 ---
 
