@@ -52,8 +52,14 @@ This is a **18-chapter interview-preparation pack** (~100+ printed pages). Every
 | 22 | [48-Hour Intensive Study Plan](22_2day_study_plan.md) | 4 | **NEW.** Hour-by-hour Tue→Thu schedule (Apr 28–30) for the actual interview |
 | 23 | [High-Probability Q&A Bank](23_high_probability_qa.md) | 8 | **NEW.** 40 likely questions tuned to Avrioc JD with model answers tied to your resume |
 | 24 | [Apache Airflow End-to-End](24_apache_airflow.md) | 12 | **NEW.** Architecture, operators by category, scheduling semantics, XCom, sensors, executors, gotchas, 30 Q&A |
+| 25 | [Flask API](25_flask_api.md) | 8 | **NEW.** WSGI, production deployment, Flask vs FastAPI vs Django, ML serving patterns |
+| 26 | [Resume Skills Crib Sheet](26_resume_skills_crib.md) | 9 | **NEW.** 1-paragraph narrative for every tool/skill on your resume |
+| 27 | [RAG Evaluation Deep Dive](27_rag_evaluation.md) | 11 | **NEW.** Precision@k, Recall@k, MRR, NDCG, RAGAS metrics with full math + worked examples |
+| 28 | [Resume Selection System Design](28_resume_selection_system.md) | 12 | **NEW.** Full RAG-style system design: 1K resumes/day → top-100 ranked, all challenges + evaluation |
+| 29 | [Ensemble Models](29_ensemble_models.md) | 12 | **NEW.** Bagging vs boosting, XGBoost / LightGBM / CatBoost / RF, loss functions, evaluation metrics, 15 Q&A |
+| 30 | [Weather Agent System Design](30_weather_agent_system.md) | 13 | **NEW.** OpenAI tool calling spec, conversation memory, LangGraph state machine, WebSocket + Lambda + DynamoDB |
 
-**Total: ~175 pages** of focused, depth-first content.
+**Total: ~240 pages** of focused, depth-first content.
 
 ---
 
