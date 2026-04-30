@@ -58,8 +58,11 @@ This is a **18-chapter interview-preparation pack** (~100+ printed pages). Every
 | 28 | [Resume Selection System Design](28_resume_selection_system.md) | 12 | **NEW.** Full RAG-style system design: 1K resumes/day → top-100 ranked, all challenges + evaluation |
 | 29 | [Ensemble Models](29_ensemble_models.md) | 12 | **NEW.** Bagging vs boosting, XGBoost / LightGBM / CatBoost / RF, loss functions, evaluation metrics, 15 Q&A |
 | 30 | [Weather Agent System Design](30_weather_agent_system.md) | 13 | **NEW.** OpenAI tool calling spec, conversation memory, LangGraph state machine, WebSocket + Lambda + DynamoDB |
+| 31 | [DAWN ResMed Chatbot System](31_dawn_chatbot_system.md) | 18 | **NEW.** Dual-mode (anonymous RAG + authenticated code execution), prompt injection defense, sandbox isolation, numerical fidelity, HIPAA compliance |
+| 32 | [Claude Deep Dive + Solution Architect Cert](32_claude_workspace_and_certification.md) | 17 | **NEW.** TrueBalance ML workspace architecture, Claude API vs OpenAI, tool design, prompt caching, certification scenarios |
+| 33 | [More System Design Cases](33_more_system_designs.md) | 14 | **NEW.** Customer support agent, e-commerce recommender, enterprise RAG, code review copilot, multi-modal search, fraud detection |
 
-**Total: ~240 pages** of focused, depth-first content.
+**Total: ~290 pages** of focused, depth-first content.
 
 ---
 
