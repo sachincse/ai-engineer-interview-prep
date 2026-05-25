@@ -122,6 +122,166 @@ After clarifying, summarize what you heard. Then sketch.
 
 This is the picture. Every piece is explained next.
 
+### 31.2.1 The same architecture as a Mermaid diagram
+
+The ASCII sketch above is what you draw on the whiteboard. The Mermaid version below is what you keep in the repo — it renders natively on GitHub and shows the exact AWS components, the routed paths, **and** the conversation-history loop with summarization-on-token-overflow.
+
+```mermaid
+flowchart TB
+    %% =========================================================
+    %% CLIENT
+    %% =========================================================
+    subgraph CLIENT["🖥️ Client"]
+        WEB["Web / Mobile Chat Widget<br/>(resmed.com)<br/>holds session_id + JWT"]
+    end
+
+    %% =========================================================
+    %% AWS EDGE
+    %% =========================================================
+    subgraph EDGE["☁️ AWS Edge"]
+        APIGW["API Gateway — WebSocket API<br/>routes: $connect · $disconnect · sendMessage"]
+    end
+
+    %% =========================================================
+    %% COMPUTE
+    %% =========================================================
+    subgraph COMPUTE["⚙️ AWS Lambda (Python 3.11)"]
+        AUTH["AuthLambda<br/>($connect)<br/>validates JWT,<br/>tags is_authenticated + patient_id"]
+        CLEAN["CleanupLambda<br/>($disconnect)"]
+        ORCH["ChatOrchestratorLambda<br/>(sendMessage)<br/>history · intent · route · guard · stream"]
+        SBOX["Sandbox Lambda<br/>(isolated VPC, no internet,<br/>AST safety check,<br/>IAM-scoped patient SDK,<br/>30s hard timeout)"]
+    end
+
+    %% =========================================================
+    %% LLMs (Bedrock or external via BAA)
+    %% =========================================================
+    subgraph LLMS["🧠 Foundation Models (Bedrock / BAA-covered providers)"]
+        LLM_INTENT["Intent Classifier<br/>(Haiku / GPT-4o-mini)"]
+        LLM_SUMM["History Summarizer<br/>(Haiku)<br/>fires when turns > 30"]
+        LLM_ANS["Answer LLM — RAG path<br/>(Sonnet, streamed)"]
+        LLM_CODE["Code-Gen LLM<br/>(GPT-4o)<br/>whitelisted SDK only"]
+        LLM_INS["Insight LLM<br/>(Sonnet)<br/>numbers → NL"]
+        LLM_EMB["Embedding Model<br/>(multilingual-e5-large)"]
+        LLM_RR["Cross-Encoder Reranker"]
+    end
+
+    %% =========================================================
+    %% STATE & STORAGE
+    %% =========================================================
+    subgraph STATE["🗄️ State & Storage"]
+        DDB_SESS[("DynamoDB · chat_sessions<br/>PK=session_id, SK=turn_index<br/>TTL=30min idle")]
+        DDB_META[("DynamoDB · session_meta<br/>is_authenticated, patient_id,<br/>current_connection, idle_timeout_at")]
+        DDB_LOCK[("DynamoDB · per-session lock<br/>(conditional write, 30s TTL)")]
+        VEC[("pgVector / OpenSearch<br/>doc + video transcript<br/>+ FAQ embeddings")]
+        RDS[("RDS · sleep_reports<br/>encrypted, IAM row-scoped<br/>by aws:PrincipalTag/patient_id")]
+        S3_DOCS[("S3 · ResMed docs<br/>+ video manifest")]
+        S3_AUDIT[("S3 · audit log<br/>Object Lock · 6yr retention")]
+        SEC[("Secrets Manager<br/>API keys, model creds")]
+    end
+
+    %% =========================================================
+    %% OBSERVABILITY
+    %% =========================================================
+    subgraph OBS["📈 Observability"]
+        CW["CloudWatch + X-Ray<br/>traces, metrics, redacted logs"]
+        LF["LangFuse / Helicone<br/>per-turn LLM trace<br/>(prompt, tokens, cost)"]
+    end
+
+    %% =========================================================
+    %% CONNECTION FLOW
+    %% =========================================================
+    WEB ==>|"wss://...chat?token=JWT"| APIGW
+    APIGW -->|"$connect"| AUTH
+    APIGW -->|"$disconnect"| CLEAN
+    APIGW ==>|"sendMessage<br/>{type:user_message, content, session_id}"| ORCH
+    AUTH -->|"write auth state"| DDB_META
+
+    %% =========================================================
+    %% PER-TURN FLOW INSIDE ORCHESTRATOR
+    %% =========================================================
+    ORCH -->|"① acquire per-session lock"| DDB_LOCK
+    ORCH -->|"② load last 20 turns"| DDB_SESS
+    ORCH -->|"③ load auth state"| DDB_META
+
+    %% --- TOKEN-LIMIT / SUMMARIZATION LOOP ---
+    ORCH -.->|"④ if total_turns > 30 OR<br/>token_count > budget<br/>→ summarize older turns"| LLM_SUMM
+    LLM_SUMM -.->|"compressed system msg<br/>(replaces old turns in prompt)"| ORCH
+    ORCH -.->|"⑤ persist summary back<br/>(replaces old rows with<br/>one summary turn)"| DDB_SESS
+
+    %% --- ROUTING ---
+    ORCH -->|"⑥ classify intent<br/>(history + new msg)"| LLM_INTENT
+
+    %% --- ANONYMOUS RAG ---
+    ORCH -->|"⑦a general_doc:<br/>embed query"| LLM_EMB
+    LLM_EMB --> VEC
+    VEC -->|"top-30 (BM25 + dense + RRF)"| LLM_RR
+    LLM_RR -->|"top-5 reranked chunks"| ORCH
+    ORCH -->|"answer with citations"| LLM_ANS
+    LLM_ANS -->|"streamed tokens"| ORCH
+
+    %% --- AUTHENTICATED PATH ---
+    ORCH -->|"⑦b my_report &<br/>is_authenticated"| LLM_CODE
+    LLM_CODE -->|"Python (whitelisted SDK)"| ORCH
+    ORCH -->|"invoke(code, patient_id)"| SBOX
+    SBOX -->|"IAM-scoped read"| RDS
+    RDS --> SBOX
+    SBOX -->|"metrics JSON"| ORCH
+    ORCH -->|"metrics + question +<br/>recent history"| LLM_INS
+    LLM_INS -->|"NL answer"| ORCH
+
+    %% --- OUTPUT ---
+    ORCH -->|"⑧ guardrails:<br/>PII · cross-patient ·<br/>faithfulness · numerical fidelity"| ORCH
+    ORCH ==>|"⑨ stream tokens"| APIGW
+    APIGW ==>|"WSS frames"| WEB
+
+    %% --- PERSIST + AUDIT ---
+    ORCH -->|"⑩ append new turn"| DDB_SESS
+    ORCH -->|"⑪ release lock"| DDB_LOCK
+    ORCH -->|"⑫ PHI access audit"| S3_AUDIT
+
+    %% --- SOURCES & SECRETS ---
+    VEC -.->|"source corpus"| S3_DOCS
+    ORCH -.-> SEC
+    SBOX -.-> SEC
+
+    %% --- OBSERVABILITY ---
+    ORCH -.-> CW
+    SBOX -.-> CW
+    LLM_INTENT -.-> LF
+    LLM_ANS -.-> LF
+    LLM_CODE -.-> LF
+    LLM_INS -.-> LF
+    LLM_SUMM -.-> LF
+
+    %% =========================================================
+    %% STYLING
+    %% =========================================================
+    classDef compute fill:#fff4e6,stroke:#ff9800,color:#000
+    classDef store fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef llm fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef edge fill:#e8f5e9,stroke:#388e3c,color:#000
+    classDef obs fill:#eceff1,stroke:#455a64,color:#000
+    classDef client fill:#fce4ec,stroke:#c2185b,color:#000
+
+    class AUTH,CLEAN,ORCH,SBOX compute
+    class DDB_SESS,DDB_META,DDB_LOCK,VEC,RDS,S3_DOCS,S3_AUDIT,SEC store
+    class LLM_INTENT,LLM_SUMM,LLM_ANS,LLM_CODE,LLM_INS,LLM_EMB,LLM_RR llm
+    class APIGW edge
+    class CW,LF obs
+    class WEB client
+```
+
+**Reading the diagram for an interviewer:**
+
+- **Solid double arrows (`==>`)** are the user-visible WebSocket flow — JWT in, streamed tokens out.
+- **Solid single arrows (`-->`)** are synchronous per-turn calls (load history, classify, retrieve, generate, persist).
+- **Dashed arrows (`-.->`)** are *conditional* paths — the summarizer only fires when history exceeds the threshold; observability and Secrets Manager are sidecars on every call.
+- Steps ④–⑤ are the **conversation-history + token-limit story**:
+  1. Lambda fetches the last 20 turns from `chat_sessions` (DynamoDB `Query`, sorted by `turn_index`).
+  2. If `count(turns) > 30` *or* the assembled prompt would exceed the answer LLM's context budget, the orchestrator calls the **Summarizer LLM** (Haiku — cheap, fast) on the *older* turns.
+  3. The summary comes back as a single condensed `system` message that **replaces** the old rows in DynamoDB (writing a synthetic turn with `role="system_summary"` and TTL aligned to the session). Subsequent turns now load `[summary, last_N_turns]` and stay inside the budget.
+  4. If a downstream LLM call still returns a `context_length_exceeded` error from the provider, the orchestrator force-summarizes more aggressively (target 50% of the previous budget) and retries once; on a second failure it falls back to the templated *"Could you narrow your question — for example, ask about a specific time window?"* response.
+
 ---
 
 ## 31.3 Authentication and the dual-mode trick
@@ -1264,6 +1424,233 @@ If the interviewer asks "what was the unique technical challenge of this project
 > The third unique challenge was numerical fidelity. In a clinical context, the LLM stating a wrong number is dangerous. We added a deterministic post-check that parses out every numerical claim from the LLM's response and cross-references against the metrics dict from the sandbox. Mismatch triggers regeneration; persistent mismatch triggers a templated fallback. That single check catches the highest-stakes failure mode that pure LLM-as-judge evaluation can miss."
 
 This three-paragraph answer hits dual-mode design, code execution security, and the numerical fidelity check — the three things that make DAWN technically distinctive.
+
+---
+
+## 31.21 Appendix F — Reference implementation in LangGraph
+
+The DAWN orchestrator as described in §31.2 is hand-rolled Python in a Lambda. A common interview follow-up is *"how would this look if you used LangGraph?"* — the question is really *"do you understand graph state, checkpointers, and message reducers?"* This appendix sketches the equivalent design.
+
+**Key shift in mental model:** in LangGraph you stop thinking *"fetch history → format prompt → save history"* and start thinking *"the graph has a `messages` list that grows automatically via the `add_messages` reducer; my only job is to decide when to trim or summarize it."* History is **pulled from a checkpointer by `thread_id`** before every invocation and **persisted automatically after every node** — no manual DynamoDB query, no manual prompt-stuff.
+
+```mermaid
+flowchart TB
+    %% =========================================================
+    %% CLIENT
+    %% =========================================================
+    subgraph CLIENT["🖥️ Client"]
+        APP["Chat App<br/>calls graph.invoke<br/>with a HumanMessage and<br/>config thread_id = session_id"]
+    end
+
+    %% =========================================================
+    %% LANGGRAPH RUNTIME (inside ChatOrchestratorLambda)
+    %% =========================================================
+    subgraph RUNTIME["⚙️ LangGraph Runtime (inside ChatOrchestratorLambda)"]
+
+        subgraph STATEDEF["📦 DawnState (TypedDict)"]
+            STATE_FIELDS["messages — list of AnyMessage<br/>(reducer = add_messages)<br/>session_id — str<br/>is_authenticated — bool<br/>patient_id — str or None<br/>intent — general_doc / my_report / medical / oos<br/>retrieved_chunks — list of dict<br/>sandbox_metrics — dict<br/>summary — str or None"]
+        end
+
+        ENTRY(["START — graph entry<br/>checkpointer auto-loads<br/>prior DawnState by thread_id"])
+
+        SUMM_NODE["① summarize_if_long node<br/>───────────────<br/>when len(messages) exceeds 30:<br/>• call Haiku on the older slice<br/>• emit RemoveMessage for each old turn<br/>• append one SystemMessage(summary)<br/>• store summary in state.summary<br/>(see code block below the diagram)"]
+
+        TRIM_NODE["② trim_messages helper<br/>(from langchain_core)<br/>───────────────<br/>strategy = last<br/>max_tokens = 4000<br/>token_counter = sonnet tokenizer<br/>include_system = true"]
+
+        INTENT_NODE["③ intent_classifier_node<br/>───────────────<br/>haiku.invoke(<br/>system_prompt + state.messages<br/>)<br/>writes state.intent"]
+
+        ROUTER{"④ conditional_edge<br/>on state.intent<br/>+ state.is_authenticated"}
+
+        subgraph RAG_SG["🟢 RAG subgraph (general_doc)"]
+            EMBED_N["embed_query_node"]
+            HYB_N["hybrid_search_node<br/>(pgVector + BM25 + RRF)"]
+            RERANK_N["rerank_node<br/>(cross-encoder, top-5)"]
+            ANSWER_N["answer_llm_node<br/>(Sonnet, streamed,<br/>citations required)"]
+            FAITH_N{"faithfulness_check_node<br/>(per-claim verify)"}
+        end
+
+        subgraph AUTH_SG["🔵 Auth subgraph (my_report)"]
+            AUTHZ{"auth_gate<br/>is_authenticated?"}
+            CODEGEN_N["codegen_llm_node<br/>(GPT-4o, whitelisted SDK)"]
+            SBOX_TOOL[/"sandbox_tool<br/>= boto3.invoke SandboxLambda<br/>runs in a separate AWS Lambda<br/>— NOT a graph node —<br/>IAM and VPC isolation kept"/]
+            INSIGHT_N["insight_llm_node<br/>(Sonnet, NL from metrics)"]
+            NUMCHK{"numerical_fidelity_check<br/>parse numbers from answer<br/>vs sandbox_metrics<br/>mismatch → retry x3"}
+        end
+
+        REFUSE_N["refusal_templated_node<br/>(medical_advice / oos /<br/>not_authenticated)"]
+
+        GUARD_N["⑤ output_guardrails_node<br/>PII regex · cross-patient ID ·<br/>system-prompt leakage · toxicity"]
+
+        STREAM_N["⑥ stream_node<br/>(APIGW Management API<br/>posts AIMessage chunks)"]
+
+        END_NODE(["END — graph exit<br/>checkpointer auto-writes<br/>new DawnState by thread_id<br/>add_messages reducer<br/>appends new turns"])
+    end
+
+    %% =========================================================
+    %% PERSISTENCE
+    %% =========================================================
+    subgraph PERSIST["🗄️ Persistence (AWS)"]
+        DDB_CKPT[("DynamoDBSaver checkpointer<br/>PK=thread_id (=session_id)<br/>SK=checkpoint_id<br/>blob: serialized DawnState<br/>TTL=30min idle")]
+        EXT_VEC[("pgVector / OpenSearch<br/>doc embeddings")]
+        EXT_RDS[("RDS · sleep_reports<br/>(IAM row-scoped,<br/>reached via Sandbox Lambda)")]
+        EXT_AUDIT[("S3 · PHI audit log<br/>(Object Lock, 6yr)")]
+    end
+
+    %% =========================================================
+    %% FOUNDATION MODELS
+    %% =========================================================
+    subgraph LLMS["🧠 Foundation Models"]
+        LM_HAIKU["Haiku<br/>(intent + summarize)"]
+        LM_SONNET["Sonnet<br/>(answer + insight)"]
+        LM_GPT4O["GPT-4o<br/>(codegen)"]
+    end
+
+    %% =========================================================
+    %% EDGES
+    %% =========================================================
+    APP ==>|"new HumanMessage + thread_id"| ENTRY
+    ENTRY <-->|"load prior<br/>DawnState"| DDB_CKPT
+    ENTRY --> SUMM_NODE
+
+    SUMM_NODE -->|"may emit<br/>RemoveMessage + SystemMessage"| TRIM_NODE
+    SUMM_NODE -.->|"haiku call"| LM_HAIKU
+    TRIM_NODE --> INTENT_NODE
+    INTENT_NODE -.-> LM_HAIKU
+    INTENT_NODE --> ROUTER
+
+    ROUTER -->|"general_doc"| EMBED_N
+    EMBED_N --> HYB_N
+    HYB_N <--> EXT_VEC
+    HYB_N --> RERANK_N
+    RERANK_N --> ANSWER_N
+    ANSWER_N -.-> LM_SONNET
+    ANSWER_N --> FAITH_N
+    FAITH_N -->|"pass"| GUARD_N
+    FAITH_N -->|"fail x3 → fallback"| GUARD_N
+
+    ROUTER -->|"my_report"| AUTHZ
+    AUTHZ -->|"yes"| CODEGEN_N
+    AUTHZ -->|"no"| REFUSE_N
+    CODEGEN_N -.-> LM_GPT4O
+    CODEGEN_N --> SBOX_TOOL
+    SBOX_TOOL <-->|"IAM-scoped<br/>read-only"| EXT_RDS
+    SBOX_TOOL --> INSIGHT_N
+    INSIGHT_N -.-> LM_SONNET
+    INSIGHT_N --> NUMCHK
+    NUMCHK -->|"mismatch"| INSIGHT_N
+    NUMCHK -->|"pass / final fallback"| GUARD_N
+
+    ROUTER -->|"medical / oos"| REFUSE_N
+    REFUSE_N --> GUARD_N
+
+    GUARD_N --> STREAM_N
+    STREAM_N ==>|"AIMessage chunks"| APP
+    STREAM_N --> END_NODE
+    END_NODE -->|"persist new state<br/>(automatic)"| DDB_CKPT
+
+    %% audit sidecar
+    SBOX_TOOL -.->|"PHI access"| EXT_AUDIT
+    INSIGHT_N -.->|"final answer"| EXT_AUDIT
+
+    %% =========================================================
+    %% STYLING
+    %% =========================================================
+    classDef llmnode fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef tool fill:#fff4e6,stroke:#ff9800,color:#000
+    classDef stateblock fill:#e8f5e9,stroke:#388e3c,color:#000
+    classDef ckpt fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef guard fill:#ffebee,stroke:#c62828,color:#000
+    classDef client fill:#fce4ec,stroke:#c2185b,color:#000
+
+    class INTENT_NODE,ANSWER_N,CODEGEN_N,INSIGHT_N,SUMM_NODE llmnode
+    class SBOX_TOOL,EMBED_N,HYB_N,RERANK_N,TRIM_NODE tool
+    class STATE_FIELDS,STATEDEF stateblock
+    class DDB_CKPT,EXT_VEC,EXT_RDS,EXT_AUDIT ckpt
+    class GUARD_N,NUMCHK,FAITH_N,REFUSE_N,AUTHZ,ROUTER guard
+    class APP client
+```
+
+### 31.21.1 How conversation history flows in this version
+
+The hand-rolled version called `load_history(session_id)` against DynamoDB and then string-interpolated the result into a prompt template. LangGraph hides both halves:
+
+| Hand-rolled (§31.9) | LangGraph equivalent |
+|---|---|
+| `dynamodb.query(... where session_id = :sid ...)` | `DynamoDBSaver(...)` checkpointer auto-loads on `graph.invoke(..., config={"thread_id": session_id})` |
+| `prompt.format(conv_history=rows)` | `state["messages"]` is the canonical history; nodes pass it directly to LLMs |
+| `dynamodb.put_item(... new turn ...)` | Checkpointer auto-writes the updated `DawnState` after every node fires |
+| Sliding window of 20 turns | `trim_messages(strategy="last", max_tokens=4000, token_counter=sonnet)` inside each LLM node |
+| Summarization fallback for >30 turns | `summarize_if_long` node emitting `RemoveMessage(id=…)` for every old turn + one `SystemMessage(summary)` |
+| Per-session DynamoDB lock | Native: a single `thread_id` only allows one in-flight `invoke` at a time (LangGraph blocks; you can configure timeout) |
+
+A concrete code skeleton for the summarization node — the part most candidates flub:
+
+```python
+from langchain_core.messages import RemoveMessage, SystemMessage
+
+def summarize_if_long(state: DawnState) -> dict:
+    msgs = state["messages"]
+    if len(msgs) < 30:
+        return {}                                # no-op; reducer keeps state
+
+    old, recent = msgs[:-20], msgs[-20:]
+    summary = haiku.invoke([
+        SystemMessage(content="Summarize this conversation in <=200 words. "
+                              "Preserve facts the user cares about: their AHI, "
+                              "mask model, any open issues."),
+        *old,
+    ]).content
+
+    # RemoveMessage(id=...) is LangGraph's way of telling the add_messages
+    # reducer to DELETE those entries from state. Without this, summarization
+    # would just *append* a summary alongside the old turns — no win.
+    return {
+        "messages": [
+            *(RemoveMessage(id=m.id) for m in old),
+            SystemMessage(content=f"[Earlier conversation summary]\n{summary}"),
+        ],
+        "summary": summary,
+    }
+```
+
+And the entry-point trim, which runs inside *every* LLM-calling node so the model never sees more than its budget:
+
+```python
+from langchain_core.messages import trim_messages
+
+def answer_llm_node(state: DawnState) -> dict:
+    trimmed = trim_messages(
+        state["messages"],
+        max_tokens=4000,
+        strategy="last",
+        token_counter=sonnet,         # uses the *model's* tokenizer
+        include_system=True,
+        allow_partial=False,
+    )
+    response = sonnet.invoke([SystemMessage(ANSWER_PROMPT), *trimmed])
+    return {"messages": [response]}   # add_messages appends the AIMessage
+```
+
+### 31.21.2 What stays in AWS (not moved into the graph)
+
+A senior signal — know what *not* to put in LangGraph:
+
+- **Sandbox Lambda stays a separate AWS Lambda**, invoked via `boto3` as a tool. Putting it inside the graph would collapse the IAM/VPC isolation that is the whole point of §31.5. The graph orchestrates, AWS isolates.
+- **API Gateway WebSocket + AuthLambda + CleanupLambda stay as-is.** LangGraph runs *inside* the `ChatOrchestratorLambda`. Auth state is still set at `$connect` and read into `DawnState` at graph entry.
+- **DynamoDB tables**: the `DynamoDBSaver` checkpointer is one table (or one item per checkpoint). The original `session_meta` table still holds the per-connection auth tag — written by AuthLambda, read by the orchestrator before invoking the graph.
+- **S3 audit log + Object Lock** stay outside the graph — they're triggered as side effects from the sandbox tool and the insight node.
+
+### 31.21.3 Trade-offs to verbalize
+
+| Win | Cost |
+|---|---|
+| Conversation history handled by framework — fewer bugs around "which turns did I forget to save?" | New dependency surface (`langgraph`, `langchain-core`, model-specific tokenizers in Lambda layers) |
+| Cleaner code: nodes are pure functions of state; easy to unit-test | Cold-start time on Lambda grows (~300–600 ms) — mitigate with provisioned concurrency |
+| Built-in `RemoveMessage` semantics make summarization race-free | LangGraph's auto-persistence writes the *entire* state blob on every node; tune checkpoint frequency (`checkpoint_during=False` on cheap nodes) for cost |
+| Easy A/B testing: swap a node, redeploy the graph | Harder to reason about replay/recovery semantics than a flat orchestrator |
+| Streaming via `graph.astream_events` matches the WebSocket model naturally | The sandbox tool call is synchronous and blocks the graph — must explicitly stream "looking up your data…" placeholder while it runs |
+
+If the interviewer asks *"would you actually use LangGraph for this in prod?"*, the calibrated answer is: **"For a clinical system with HIPAA constraints I'd probably keep the hand-rolled orchestrator — fewer dependencies in the audit perimeter. LangGraph shines when the agent gets more dynamic — multi-hop tool use, planner-executor patterns, recoverable long-running tasks. DAWN is mostly a fixed-shape pipeline with two branches, so the LangGraph benefit is mostly developer ergonomics, not capability we couldn't otherwise build."**
 
 ---
 
