@@ -122,6 +122,8 @@ After clarifying, summarize what you heard. Then sketch.
 
 This is the picture. Every piece is explained next.
 
+> **Editable diagram source:** the two architectures below (AWS as-built and the LangGraph alternative) are also kept as a single editable file at [`interview/diagrams/31_dawn_architecture.drawio`](diagrams/31_dawn_architecture.drawio). Open it on [diagrams.net](https://app.diagrams.net) or with the VS Code Draw.io extension to tweak shapes, colors, and labels for slide decks or whiteboard sessions. The file contains two pages: **AWS Architecture** and **LangGraph**.
+
 ### 31.2.1 The same architecture as a Mermaid diagram
 
 The ASCII sketch above is what you draw on the whiteboard. The Mermaid version below is what you keep in the repo — it renders natively on GitHub and shows the exact AWS components, the routed paths, **and** the conversation-history loop with summarization-on-token-overflow.
