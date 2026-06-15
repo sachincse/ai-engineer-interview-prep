@@ -1,6 +1,6 @@
 # AI Engineering Interview Preparation Library
 
-> **Purpose:** A general-purpose interview prep library for senior AI / ML / LLMOps engineering roles. The technical chapters (01–18, 20–36) are vendor-neutral and apply to any AI engineering interview at any company. The company-specific chapters (19, 37) demonstrate how to research and prepare for a particular target — examples included for Avrioc Technologies (Abu Dhabi, AI Engineer) and Upvest (Berlin, Applied AI). Add a new company-intel chapter when targeting a new company; the rest of the library carries over.
+> **Purpose:** A general-purpose interview prep library for senior AI / ML / LLMOps engineering roles. The technical chapters (01–18, 20–36) are vendor-neutral and apply to any AI engineering interview at any company. The company-specific chapters (19, 37, 40) demonstrate how to research and prepare for a particular target — examples included for Avrioc Technologies (Abu Dhabi, AI Engineer), Upvest (Berlin, Applied AI), and Rakuten Travel (Tokyo, AI Application Engineer / ML Engineer). Add a new company-intel chapter when targeting a new company; the rest of the library carries over.
 >
 > **Maintained by:** Sachin Singh — AI Engineer | ML Solutions Architect | MLOps & LLMOps Expert. 8+ years across TrueBalance, ResMed, Tiger Analytics, Sopra Steria. Resume tie-ins throughout the library reference these projects, but the technical content is general.
 
@@ -78,8 +78,10 @@
 | 36 | [Fintech AI Compliance](36_fintech_ai_compliance.md) | 13 | **NEW.** BaFin, FCA, GDPR (Article 22), MiFID II, DORA, EU AI Act, scenarios |
 | 37 | [Upvest Company Intel & Applied AI Role](37_upvest_company_intel.md) | 11 | **NEW.** Company-specific prep for Upvest Applied AI role — products, role analysis, 12 Q&A, 30-60-90 plan |
 | 38 | [Lambda Cold-Start Mitigation for ML](38_lambda_cold_start_ml.md) | 14 | **NEW.** The three phases, model-class-specific strategies, PC sizing, multi-stage Dockerfiles, ONNX/INT8 for transformers, EFS mounts, when to leave Lambda |
+| 39 | [Adaxon Mini-Recommender Case Study](39_adaxon_mini_recommender_case_study.md) | 12 | **NEW.** End-to-end take-home walk-through of a containerised app-recommendation service — defend every decision, modify code live. |
+| 40 | [Rakuten Travel AI Office — Company Intel, Role-Fit & Deep Prep](40_rakuten_travel_ai_intel.md) | 40 | **NEW.** Two-role verdict (AI App Engineer vs ML Engineer) + agency-screen playbook. Agents+MCP, context/RAG, agent eval (+trajectory eval), A/B+bandits+interleaving, Vertex/GCP, system design, behavioral, Rakuten Shugi, mock transcripts, 40 flashcards, morning cheat sheet. |
 
-**Total: ~355 pages** across 38 chapters.
+**Total: ~405 pages** across 40 chapters.
 
 ### Chapters by company
 
@@ -87,6 +89,7 @@ If you're prepping for a specific target, use these as starting points (and the 
 
 - **Avrioc Technologies (Abu Dhabi, AI Engineer)** — Chapter [19](19_avrioc_company_intel.md) for company intel, [22](22_2day_study_plan.md) for the 48-hour plan, [23](23_high_probability_qa.md) for Avrioc-tuned Q&A.
 - **Upvest (Berlin, Applied AI)** — Chapter [37](37_upvest_company_intel.md) for company intel, [34](34_mcp_deep_dive.md) for MCP (the Upvest JD's first responsibility), [35](35_n8n_ai_consulting.md) for n8n + AI consulting (Upvest JD-named), [36](36_fintech_ai_compliance.md) for BaFin/FCA/GDPR.
+- **Rakuten Travel (Tokyo, AI Office / TDD)** — Chapter [40](40_rakuten_travel_ai_intel.md) for the two-role verdict + deep prep (AI Application Engineer recommended), [34](34_mcp_deep_dive.md) for MCP, [07](07_rag.md)/[27](27_rag_evaluation.md) for RAG + eval, [16](16_system_design.md)/[33](33_more_system_designs.md) for system design. See also the standalone [Upvest Applied AI interview prep](upvest_applied_ai_interview_prep.md).
 - **Other companies** — copy the structure of [19](19_avrioc_company_intel.md) or [37](37_upvest_company_intel.md) as a template; rest of the library applies as-is.
 
 ---
