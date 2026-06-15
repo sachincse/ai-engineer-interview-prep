@@ -1,6 +1,6 @@
 # AI Engineering Interview Preparation Library
 
-> **Purpose:** A general-purpose interview prep library for senior AI / ML / LLMOps engineering roles. The technical chapters (01–18, 20–36) are vendor-neutral and apply to any AI engineering interview at any company. The company-specific chapters (19, 37, 40) demonstrate how to research and prepare for a particular target — examples included for Avrioc Technologies (Abu Dhabi, AI Engineer), Upvest (Berlin, Applied AI), and Rakuten Travel (Tokyo, AI Application Engineer / ML Engineer). Add a new company-intel chapter when targeting a new company; the rest of the library carries over.
+> **Purpose:** A general-purpose interview prep library for senior AI / ML / LLMOps engineering roles. The technical chapters (01–18, 20–36, 38, 41) are vendor-neutral and apply to any AI engineering interview at any company. The company-specific chapters (19, 37, 40) demonstrate how to research and prepare for a particular target — examples included for Avrioc Technologies (Abu Dhabi, AI Engineer), Upvest (Berlin, Applied AI), and Rakuten Travel (Tokyo, AI Application Engineer / ML Engineer). Add a new company-intel chapter when targeting a new company; the rest of the library carries over.
 >
 > **Maintained by:** Sachin Singh — AI Engineer | ML Solutions Architect | MLOps & LLMOps Expert. 8+ years across TrueBalance, ResMed, Tiger Analytics, Sopra Steria. Resume tie-ins throughout the library reference these projects, but the technical content is general.
 
@@ -80,8 +80,9 @@
 | 38 | [Lambda Cold-Start Mitigation for ML](38_lambda_cold_start_ml.md) | 14 | **NEW.** The three phases, model-class-specific strategies, PC sizing, multi-stage Dockerfiles, ONNX/INT8 for transformers, EFS mounts, when to leave Lambda |
 | 39 | [Adaxon Mini-Recommender Case Study](39_adaxon_mini_recommender_case_study.md) | 12 | **NEW.** End-to-end take-home walk-through of a containerised app-recommendation service — defend every decision, modify code live. |
 | 40 | [Rakuten Travel AI Office — Company Intel, Role-Fit & Deep Prep](40_rakuten_travel_ai_intel.md) | 40 | **NEW.** Two-role verdict (AI App Engineer vs ML Engineer) + agency-screen playbook. Agents+MCP, context/RAG, agent eval (+trajectory eval), A/B+bandits+interleaving, Vertex/GCP, system design, behavioral, Rakuten Shugi, mock transcripts, 40 flashcards, morning cheat sheet. |
+| 41 | [LLM Gateway (AI Gateway / Model Router)](41_llm_gateway.md) | 10 | **NEW.** Unified multi-provider API, routing, fallback, caching, rate limits, budgets, observability; LiteLLM/Portkey/Bedrock/Vertex; gateway vs MCP vs orchestrator; build-vs-buy; code + minimal gateway internals. |
 
-**Total: ~405 pages** across 40 chapters.
+**Total: ~415 pages** across 41 chapters.
 
 ### Chapters by company
 
