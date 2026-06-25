@@ -81,8 +81,9 @@
 | 39 | [Adaxon Mini-Recommender Case Study](39_adaxon_mini_recommender_case_study.md) | 12 | **NEW.** End-to-end take-home walk-through of a containerised app-recommendation service — defend every decision, modify code live. |
 | 40 | [Rakuten Travel AI Office — Company Intel, Role-Fit & Deep Prep](40_rakuten_travel_ai_intel.md) | 40 | **NEW.** Two-role verdict (AI App Engineer vs ML Engineer) + agency-screen playbook. Agents+MCP, context/RAG, agent eval (+trajectory eval), A/B+bandits+interleaving, Vertex/GCP, system design, behavioral, Rakuten Shugi, mock transcripts, 40 flashcards, morning cheat sheet. |
 | 41 | [LLM Gateway (AI Gateway / Model Router)](41_llm_gateway.md) | 10 | **NEW.** Unified multi-provider API, routing, fallback, caching, rate limits, budgets, observability; LiteLLM/Portkey/Bedrock/Vertex; gateway vs MCP vs orchestrator; build-vs-buy; code + minimal gateway internals. |
+| 42 | [Apparel Group AI/ML Assessment (Req #8682)](42_apparel_group_ml_assessment.md) | ~40 | **NEW.** 163 verified MCQ + coding practice questions across 10 sections for the sub-45-min Apparel Group online technical screen, with answers behind collapsible toggles for self-testing. Reconstructed from Mettl/iMocha/HackerRank/Adaface/TestDome ML-Engineer templates with every answer key adversarially audited. Includes platform/proctoring format intel + Apparel Group company/role intel (6thStreet, retail-AI use cases). |
 
-**Total: ~415 pages** across 41 chapters.
+**Total: ~455 pages** across 42 chapters.
 
 ### Chapters by company
 
@@ -91,6 +92,7 @@ If you're prepping for a specific target, use these as starting points (and the 
 - **Avrioc Technologies (Abu Dhabi, AI Engineer)** — Chapter [19](19_avrioc_company_intel.md) for company intel, [22](22_2day_study_plan.md) for the 48-hour plan, [23](23_high_probability_qa.md) for Avrioc-tuned Q&A.
 - **Upvest (Berlin, Applied AI)** — Chapter [37](37_upvest_company_intel.md) for company intel, [34](34_mcp_deep_dive.md) for MCP (the Upvest JD's first responsibility), [35](35_n8n_ai_consulting.md) for n8n + AI consulting (Upvest JD-named), [36](36_fintech_ai_compliance.md) for BaFin/FCA/GDPR.
 - **Rakuten Travel (Tokyo, AI Office / TDD)** — Chapter [40](40_rakuten_travel_ai_intel.md) for the two-role verdict + deep prep (AI Application Engineer recommended), [34](34_mcp_deep_dive.md) for MCP, [07](07_rag.md)/[27](27_rag_evaluation.md) for RAG + eval, [16](16_system_design.md)/[33](33_more_system_designs.md) for system design. See also the standalone [Upvest Applied AI interview prep](upvest_applied_ai_interview_prep.md).
+- **Apparel Group (Dubai, AI ML Engineer — online assessment)** — Chapter [42](42_apparel_group_ml_assessment.md): a self-test bank of 163 verified questions for the sub-45-min Mettl/iMocha-style technical screen, plus platform/proctoring format intel and company intel. Drill the first six sections hardest (core ML, metrics, classical algos, Python/sklearn, stats, deep learning).
 - **Other companies** — copy the structure of [19](19_avrioc_company_intel.md) or [37](37_upvest_company_intel.md) as a template; rest of the library applies as-is.
 
 ---
