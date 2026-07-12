@@ -29,6 +29,14 @@
 | 17 | [Behavioral & HR](interview/17_behavioral_hr.md) | 15 behavioral Qs, UAE specifics, compensation negotiation |
 | 18 | [Cheatsheet](interview/18_cheatsheet.md) | Formulas, numbers, commands, names — morning-of revision |
 
+## Company-specific packs
+
+Beyond the 18 core chapters, `interview/` holds role- and company-specific prep banks (chapters 19+). The most comprehensive recent one:
+
+| # | Pack | Covers |
+|---|------|--------|
+| 45 | [Google · Staff AI/ML Engineer, YouTube Create](interview/45_google_youtube_create_staff_aiml.md) | ~50-page L6 pack: JD decode, YouTube Create product & tech intel, the full interview loop, coding bank, CV/video ML, diffusion (Imagen/Veo), ASR & audio, **on-device/mobile ML**, **6 worked ML system designs** with diagrams, Googleyness & leadership, a mock design transcript, and a 40-question rapid-fire bank |
+
 ## Suggested 2-week study plan
 
 | Day | Focus |
