@@ -35,6 +35,7 @@ Beyond the 18 core chapters, `interview/` holds role- and company-specific prep 
 
 | # | Pack | Covers |
 |---|------|--------|
+| 46 | [Logic20/20 · Offshore Senior MLE (SDG&E Vegetation Management)](interview/46_logic2020_senior_mle_sdge_veg.md) | Full 2-round notebook for a wildfire vegetation-management MLE seat: Logic20/20 + SDG&E intel (VRI, TreeVision, WiNGS, WMP/OEIS/CPUC, HFTD, grow-in vs fall-in, PSPS), the vegetation-ML domain (LiDAR point clouds, aerial/satellite segmentation, encroachment risk, geospatial stack), resume→role skill-map with **honest-gap bridges**, a whiteboard-able reference architecture, worked system design, live-coding, **per-interviewer game plans**, a ~54-question bank, market context, a morning-of cheatsheet, and a **do-NOT-state-as-fact** honesty section |
 | 45 | [Google · Staff AI/ML Engineer, YouTube Create](interview/45_google_youtube_create_staff_aiml.md) | ~50-page L6 pack: JD decode, YouTube Create product & tech intel, the full interview loop, coding bank, CV/video ML, diffusion (Imagen/Veo), ASR & audio, **on-device/mobile ML**, **6 worked ML system designs** with diagrams, Googleyness & leadership, a mock design transcript, and a 40-question rapid-fire bank |
 
 ## Suggested 2-week study plan
