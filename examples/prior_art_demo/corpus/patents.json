@@ -1,0 +1,243 @@
+{
+  "_comment": "Toy corpus for the prior-art demo. Entirely fictional documents invented for teaching. Dates, numbers and text are made up; nothing here is a real patent. Structure mirrors what you would get from EPO OPS / PATSTAT: bibliographic data, dates, family id, CPC, and sectioned full text.",
+
+  "disclosure": {
+    "id": "INTERNAL-2026-0042",
+    "title": "Selective hydrogenation of an unsaturated aldehyde over a cerium-promoted palladium catalyst",
+    "priority_date": "2026-03-01",
+    "cpc": ["B01J23/44", "C07C45/62"],
+    "text": "A process for the selective hydrogenation of an unsaturated aldehyde, wherein the catalyst comprises palladium supported on a gamma-alumina carrier, the catalyst further comprising cerium as a promoter in an amount of 0.4 to 0.6 wt%, the reaction being carried out at a temperature of 180 to 220 degrees C and at a hydrogen to substrate molar ratio of 2.2 to 2.4.",
+    "compound": {
+      "name": "cerium-promoted palladium on gamma-alumina",
+      "features": ["Pd", "Ce", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+    }
+  },
+
+  "documents": [
+    {
+      "id": "EP1000001A1",
+      "family_id": "F-101",
+      "kind": "A1",
+      "title": "Hydrogenation catalyst comprising palladium on an aluminium oxide carrier",
+      "filing_date": "2014-05-11",
+      "priority_date": "2013-05-20",
+      "publication_date": "2015-11-25",
+      "cpc": ["B01J23/44"],
+      "sections": {
+        "claims": "1. A hydrogenation catalyst comprising palladium deposited on a gamma-aluminium oxide carrier, characterised in that the catalyst further comprises lanthanum as a promoter in an amount of 1.0 to 5.0 wt%.",
+        "description": "The catalyst of the invention is prepared by impregnation of the gamma-aluminium oxide carrier with a palladium salt. Hydrogenation is conveniently carried out at a temperature of 150 to 200 degrees C.",
+        "examples": "Example 4: palladium (0.5 wt%) on gamma-aluminium oxide promoted with lanthanum (2.0 wt%), operated at 175 degrees C."
+      },
+      "compound": {
+        "name": "lanthanum-promoted palladium on gamma-alumina",
+        "features": ["Pd", "La", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "US9000002B2",
+      "family_id": "F-101",
+      "kind": "B2",
+      "title": "Hydrogenation catalyst comprising palladium on an aluminium oxide carrier",
+      "filing_date": "2014-05-11",
+      "priority_date": "2013-05-20",
+      "publication_date": "2017-02-14",
+      "cpc": ["B01J23/44"],
+      "sections": {
+        "claims": "1. A hydrogenation catalyst comprising palladium deposited on a gamma-aluminium oxide carrier and lanthanum in an amount of 1.0 to 5.0 wt%.",
+        "description": "US member of the same family. Hydrogenation at 150 to 200 degrees C.",
+        "examples": "Example 4 as in the parent application."
+      },
+      "compound": {
+        "name": "lanthanum-promoted palladium on gamma-alumina",
+        "features": ["Pd", "La", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "US8500003B1",
+      "family_id": "F-102",
+      "kind": "B1",
+      "title": "Process for hydrogenating aldehydes over supported noble metal catalysts",
+      "filing_date": "2010-01-08",
+      "priority_date": "2009-01-15",
+      "publication_date": "2011-07-21",
+      "cpc": ["C07C45/62"],
+      "sections": {
+        "claims": "1. A process for hydrogenating an unsaturated aldehyde in the presence of a palladium catalyst supported on activated carbon, at a temperature of 190 to 260 degrees C.",
+        "description": "The hydrogen to substrate molar ratio is maintained between 2.5 and 3.0 throughout the reaction.",
+        "examples": "Example 7: reaction at 210 degrees C with a hydrogen to substrate molar ratio of 2.8."
+      },
+      "compound": {
+        "name": "palladium on activated carbon",
+        "features": ["Pd", "C_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "WO2019000004A1",
+      "family_id": "F-103",
+      "kind": "A1",
+      "title": "Cerium-promoted nickel catalyst for selective hydrogenation",
+      "filing_date": "2018-09-03",
+      "priority_date": "2017-09-12",
+      "publication_date": "2019-03-14",
+      "cpc": ["B01J23/83"],
+      "sections": {
+        "claims": "1. A catalyst comprising nickel on a gamma-alumina support, the catalyst comprising cerium in an amount of 0.1 to 0.3 wt%.",
+        "description": "Selective hydrogenation is carried out at a temperature of 200 to 240 degrees C. The cerium promoter improves selectivity toward the unsaturated alcohol.",
+        "examples": "Example 2: nickel (5 wt%) with cerium (0.2 wt%) on gamma-alumina at 220 degrees C."
+      },
+      "compound": {
+        "name": "cerium-promoted nickel on gamma-alumina",
+        "features": ["Ni", "Ce", "Al2O3", "gamma_phase", "metal_oxide_support"]
+      }
+    },
+    {
+      "id": "JP2015000005A",
+      "family_id": "F-104",
+      "kind": "A",
+      "title": "Selective hydrogenation process with controlled hydrogen feed",
+      "filing_date": "2013-11-19",
+      "priority_date": "2013-11-19",
+      "publication_date": "2015-04-02",
+      "cpc": ["C07C45/62", "B01J23/44"],
+      "sections": {
+        "claims": "1. A hydrogenation process wherein a palladium catalyst on an Al2O3 carrier of the gamma phase is used, and wherein the hydrogen to substrate molar ratio is from 1.0 to 2.1.",
+        "description": "The reaction temperature is preferably from 170 to 210 degrees C. Controlling the hydrogen feed suppresses over-hydrogenation.",
+        "examples": "Example 1: operated at 195 degrees C."
+      },
+      "compound": {
+        "name": "palladium on gamma-alumina",
+        "features": ["Pd", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "NPL-JCAT-2019-0112",
+      "family_id": "F-NPL-1",
+      "kind": "NPL",
+      "title": "Effect of cerium loading on palladium hydrogenation catalysts",
+      "filing_date": null,
+      "priority_date": null,
+      "publication_date": "2019-06-01",
+      "cpc": [],
+      "sections": {
+        "claims": "",
+        "description": "We report the effect of cerium loading on palladium catalysts supported on gamma-alumina. Loadings of 0.8 to 1.2 wt% cerium gave the highest selectivity in the hydrogenation of unsaturated aldehydes.",
+        "examples": "Catalysts were tested at 200 degrees C at a hydrogen to substrate molar ratio of 2.0."
+      },
+      "compound": {
+        "name": "cerium-promoted palladium on gamma-alumina",
+        "features": ["Pd", "Ce", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "EP3000006A1",
+      "family_id": "F-105",
+      "kind": "A1",
+      "title": "Promoted palladium catalyst and use thereof",
+      "filing_date": "2025-06-10",
+      "priority_date": "2025-06-10",
+      "publication_date": "2026-12-16",
+      "cpc": ["B01J23/44"],
+      "sections": {
+        "claims": "1. A catalyst comprising palladium on a gamma-alumina support and cerium in an amount of 0.35 to 0.75 wt%, used at a temperature of 175 to 225 degrees C.",
+        "description": "Filed before the disclosure's priority date but published afterwards. Under EPC Art. 54(3) such a document counts for novelty only, never for inventive step.",
+        "examples": "Example 3: cerium 0.5 wt% at 200 degrees C."
+      },
+      "compound": {
+        "name": "cerium-promoted palladium on gamma-alumina",
+        "features": ["Pd", "Ce", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "EP3500007A1",
+      "family_id": "F-106",
+      "kind": "A1",
+      "title": "Later-filed catalyst application",
+      "filing_date": "2026-08-01",
+      "priority_date": "2026-08-01",
+      "publication_date": "2028-02-05",
+      "cpc": ["B01J23/44"],
+      "sections": {
+        "claims": "1. A catalyst comprising palladium on gamma-alumina with cerium in an amount of 0.4 to 0.6 wt% at 180 to 220 degrees C.",
+        "description": "This document is filed AFTER the disclosure's priority date. It is not prior art at all, and a system that ignores dates would report it as a perfect anticipation.",
+        "examples": "Example 1: cerium 0.5 wt% at 200 degrees C, hydrogen to substrate molar ratio 2.3."
+      },
+      "compound": {
+        "name": "cerium-promoted palladium on gamma-alumina",
+        "features": ["Pd", "Ce", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "US7000008B2",
+      "family_id": "F-107",
+      "kind": "B2",
+      "title": "Chelating agent for metal recovery from spent catalysts",
+      "filing_date": "2006-02-02",
+      "priority_date": "2005-02-10",
+      "publication_date": "2008-09-30",
+      "cpc": ["C22B7/00"],
+      "sections": {
+        "claims": "1. A method of recovering palladium from a spent catalyst using a chelating agent.",
+        "description": "The chelating agent is preferably ethylenediaminetetraacetic acid. Recovery is carried out at ambient temperature.",
+        "examples": "Example 1: leaching with EDTA at 25 degrees C."
+      },
+      "compound": {
+        "name": "EDTA",
+        "features": ["carboxylic_acid", "amine", "chelator"]
+      }
+    },
+    {
+      "id": "EP2000009A1",
+      "family_id": "F-108",
+      "kind": "A1",
+      "title": "Reactor internals for gas-liquid contacting",
+      "filing_date": "2011-03-14",
+      "priority_date": "2010-03-20",
+      "publication_date": "2012-09-19",
+      "cpc": ["B01J8/02"],
+      "sections": {
+        "claims": "1. A reactor comprising structured packing for gas-liquid contacting.",
+        "description": "Suitable for hydrogenation service at elevated temperature. No catalyst composition is claimed.",
+        "examples": "Example 1: packing tested at 200 degrees C."
+      },
+      "compound": null
+    },
+    {
+      "id": "CN104000010A",
+      "family_id": "F-109",
+      "kind": "A",
+      "title": "Supported palladium catalyst preparation method",
+      "filing_date": "2013-02-27",
+      "priority_date": "2013-02-27",
+      "publication_date": "2014-10-15",
+      "cpc": ["B01J23/44"],
+      "sections": {
+        "claims": "1. A method of preparing a palladium catalyst on an aluminium oxide of the gamma phase carrier by impregnation.",
+        "description": "The prepared catalyst is used in hydrogenation at 160 to 230 degrees C. Machine translation from Chinese.",
+        "examples": "Example 5: impregnation followed by calcination at 450 degrees C."
+      },
+      "compound": {
+        "name": "palladium on gamma-alumina",
+        "features": ["Pd", "Al2O3", "gamma_phase", "metal_oxide_support", "noble_metal"]
+      }
+    },
+    {
+      "id": "US6000011B1",
+      "family_id": "F-110",
+      "kind": "B1",
+      "title": "Rare-earth promoted noble metal catalyst",
+      "filing_date": "2002-07-08",
+      "priority_date": "2001-07-18",
+      "publication_date": "2004-01-13",
+      "cpc": ["B01J23/63"],
+      "sections": {
+        "claims": "1. A catalyst comprising a noble metal and a rare-earth promoter on a refractory oxide support.",
+        "description": "Rare-earth promoters include cerium, lanthanum and praseodymium, typically at 1.5 to 8 wt%. The noble metal may be palladium or platinum.",
+        "examples": "Example 2: palladium with cerium at 3.0 wt% on alumina."
+      },
+      "compound": {
+        "name": "rare-earth promoted noble metal on refractory oxide",
+        "features": ["Pd", "Ce", "Al2O3", "metal_oxide_support", "noble_metal"]
+      }
+    }
+  ]
+}
