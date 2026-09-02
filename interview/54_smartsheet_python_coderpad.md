@@ -9922,9 +9922,4222 @@ defences, rather than "I'd add a counter".
 
 ---
 
-## 6. Live-coding bank C — the AI/MLOps-flavoured Python they ask a platform engineer
+## 6. Live-coding bank C — the AI/MLOps-flavoured Python they will actually ask a platform engineer
 
-> ⏳ *Still being code-verified — lands in the next commit.*
+This is the bank that matters most for a **Senior AI/ML Ops Engineer** round labelled
+"COMPETENCY ASSIGNMENT: Python" on a CoderPad. Smartsheet is not going to ask you to derive
+back-propagation on a shared pad. They are going to ask you to **write a small piece of production
+infrastructure** — the kind of thing that sits between a model and a queue, or between a training
+job and a feature store — and then watch how you handle the parts that separate a senior from a
+mid: injectable clocks, bounded memory, partial failure, idempotency, and tests that do not sleep.
+
+Every problem below is a real utility. Every code block is **stdlib-only, Python 3.11, and runs as
+written** — paste it into CoderPad and hit Run. Each ends in assertions or prints so the pad proves
+you right in front of the interviewer instead of you claiming you are right.
+
+### 6.0 The protocol to run on every one of these
+
+| Beat | What you do | Time |
+|---|---|---|
+| 1. Restate | "So: a decorator that retries on transient errors with exponential backoff. Sync only, or async too?" | 15s |
+| 2. Clarify (2–3 questions, no more) | Ask the ones that change the code, not the ones that show off. | 45s |
+| 3. Name the shape | "Signature is `retry(attempts, base, cap, retry_on, sleep, rng) -> decorator`. I'll inject `sleep` and `rng` so the test is deterministic." | 20s |
+| 4. Skeleton with types first | Types + docstring + `raise NotImplementedError`, then fill. Interviewer sees structure early. | 1m |
+| 5. Fill the body, talking | Narrate decisions, not syntax. "Full jitter over equal jitter because..." | 5–8m |
+| 6. Test it in the pad | 3 tests: happy, boundary, failure. Run them. | 3m |
+| 7. Complexity + what I'd change in prod | Always volunteer this; never wait to be asked. | 1m |
+
+Three habits that read as senior on a shared screen, in every single problem:
+
+1. **Inject the clock and the RNG.** Nothing that sleeps in a test. `sleep=time.sleep` and
+   `clock=time.monotonic` as keyword defaults, overridden in tests. This one habit signals
+   "has written testable infrastructure" faster than anything else you can type.
+2. **Use `time.monotonic()` for durations, never `time.time()`.** Wall clock jumps backwards on
+   NTP correction; your rate limiter then stops limiting. Say this out loud once — it lands.
+3. **State the memory bound before the time bound.** For MLOps, memory is the thing that pages you
+   at 3am, not an extra `log n`.
+
+> **Say it like this (opening any of these):** "Before I type — two questions. Is this
+> single-process, or does it have to hold across replicas? And do I own the retry, or is there an
+> upstream one already? Those two answers change whether I write a local structure or a Redis-backed
+> one, and I'd rather not build the wrong one well."
+
+---
+
+### 6.1 Retry with exponential backoff + jitter (decorator)
+
+#### Statement
+Write a `@retry` decorator: configurable max attempts, exponentially growing delay with a cap, a
+whitelist of retryable exceptions, and a blacklist of exceptions that must fail immediately. It must
+be **testable without sleeping**.
+
+#### Clarifying questions
+- Which exceptions are retryable? (Default answer: transient transport errors and 5xx/429 — never
+  `ValueError` from your own validation, never a 400.)
+- Is the operation **idempotent**? If not, retrying a write can double-charge someone. If it isn't,
+  I want an idempotency key, not a retry.
+- Is there a global deadline for the whole call, or only a per-attempt cap?
+- Sync only, or do you want the async twin as well?
+
+#### Approach
+Exponential ceiling `min(cap, base * factor**(n-1))`, then **full jitter**: sleep a uniform draw in
+`[0, ceiling]`. Jitter exists because of the **thundering herd**: if 500 Lambda invocations all fail
+against a throttled feature store at t=0 and all back off by exactly 200ms, they collide again at
+t=200ms, and again at 400ms — you have built a synchronised DDoS of your own dependency. Full jitter
+decorrelates them. (Equal jitter, `ceiling/2 + U(0, ceiling/2)`, is the alternative when you want a
+guaranteed minimum pause; AWS's own measurements put full jitter ahead on total work done.)
+
+Both `sleep` and `rng` are parameters, so the test asserts on the *delays that would have been
+slept* without any wall-clock time passing.
+
+```python
+"""Retry with exponential backoff + full jitter. Stdlib only, deterministic under test."""
+from __future__ import annotations
+
+import functools
+import random
+import time
+from typing import Any, Callable
+
+
+class RetryError(Exception):
+    """Raised when every attempt failed. Chains the last underlying exception."""
+
+    def __init__(self, attempts: int, last: BaseException | None) -> None:
+        super().__init__(f"failed after {attempts} attempt(s); last={last!r}")
+        self.attempts = attempts
+        self.last = last
+
+
+def retry(
+    *,
+    attempts: int = 5,
+    base: float = 0.2,
+    factor: float = 2.0,
+    cap: float = 10.0,
+    retry_on: tuple[type[BaseException], ...] = (Exception,),
+    give_up_on: tuple[type[BaseException], ...] = (),
+    sleep: Callable[[float], None] = time.sleep,
+    rng: random.Random | None = None,
+    on_retry: Callable[[int, BaseException, float], None] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Retry `fn` up to `attempts` times with full-jitter exponential backoff.
+
+    give_up_on wins over retry_on (checked first) so that e.g. a 400-class error
+    nested under a generic TransportError fails fast instead of burning the budget.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+    _rng = rng if rng is not None else random.Random()
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last: BaseException | None = None
+            for n in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except give_up_on:
+                    raise                      # permanent: do not spend the budget
+                except retry_on as exc:
+                    last = exc
+                    if n == attempts:
+                        break
+                    ceiling = min(cap, base * (factor ** (n - 1)))
+                    delay = _rng.uniform(0.0, ceiling)     # full jitter
+                    if on_retry is not None:
+                        on_retry(n, exc, delay)
+                    sleep(delay)
+            raise RetryError(attempts, last) from last
+
+        wrapper.retry_config = {          # type: ignore[attr-defined]
+            "attempts": attempts, "base": base, "factor": factor, "cap": cap,
+        }
+        return wrapper
+
+    return decorator
+
+
+# ---------------------------------------------------------------- tests
+class FakeSleep:
+    """Records what would have been slept. Zero wall-clock time."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+    @property
+    def total(self) -> float:
+        return sum(self.calls)
+
+
+def test_succeeds_after_transient_failures() -> None:
+    slept, seen = FakeSleep(), {"n": 0}
+
+    @retry(attempts=4, base=0.1, cap=1.0, retry_on=(ConnectionError,),
+           sleep=slept, rng=random.Random(42))
+    def flaky() -> str:
+        seen["n"] += 1
+        if seen["n"] < 3:
+            raise ConnectionError("reset by peer")
+        return "ok"
+
+    assert flaky() == "ok"
+    assert seen["n"] == 3
+    assert len(slept.calls) == 2                      # two backoffs, three calls
+    assert 0.0 <= slept.calls[0] <= 0.1               # ceiling 0.1
+    assert 0.0 <= slept.calls[1] <= 0.2               # ceiling 0.2
+    assert slept.calls[0] != slept.calls[1]           # jitter actually varies
+
+
+def test_exhausts_and_chains() -> None:
+    slept = FakeSleep()
+
+    @retry(attempts=3, base=1.0, factor=10.0, cap=2.0, retry_on=(TimeoutError,),
+           sleep=slept, rng=random.Random(7))
+    def always_dead() -> None:
+        raise TimeoutError("feature-store 504")
+
+    try:
+        always_dead()
+        raise AssertionError("should have raised")
+    except RetryError as e:
+        assert e.attempts == 3
+        assert isinstance(e.last, TimeoutError)
+        assert isinstance(e.__cause__, TimeoutError)   # chained, so the traceback is useful
+    assert len(slept.calls) == 2
+    assert all(d <= 2.0 for d in slept.calls)          # cap respected (would be 1.0, 10.0)
+
+
+def test_permanent_error_fails_fast() -> None:
+    slept, seen = FakeSleep(), {"n": 0}
+
+    class TransportError(Exception): ...
+    class BadRequest(TransportError): ...
+
+    @retry(attempts=5, retry_on=(TransportError,), give_up_on=(BadRequest,),
+           sleep=slept, rng=random.Random(1))
+    def bad_payload() -> None:
+        seen["n"] += 1
+        raise BadRequest("422 unprocessable")
+
+    try:
+        bad_payload()
+    except BadRequest:
+        pass
+    assert seen["n"] == 1 and slept.calls == []        # no budget burned on a 4xx
+
+
+def test_deterministic_under_a_seed() -> None:
+    def run() -> list[float]:
+        slept = FakeSleep()
+
+        @retry(attempts=4, base=0.5, cap=8.0, retry_on=(RuntimeError,),
+               sleep=slept, rng=random.Random(2026))
+        def dead() -> None:
+            raise RuntimeError
+
+        try:
+            dead()
+        except RetryError:
+            pass
+        return slept.calls
+
+    assert run() == run()                              # same seed, same delays
+
+
+for t in (test_succeeds_after_transient_failures, test_exhausts_and_chains,
+          test_permanent_error_fails_fast, test_deterministic_under_a_seed):
+    t()
+print("6.1 retry: all tests passed")
+```
+
+#### Complexity
+Time: `O(attempts)` calls to `fn`, `O(1)` bookkeeping per attempt. Expected wall time for a fully
+failing call with full jitter is `0.5 * base * (factor**(attempts-1) - 1)/(factor - 1)`, truncated by
+`cap` — for the defaults (5 attempts, base 0.2, cap 10) that is ≈1.5s. Space: `O(1)`.
+
+#### Follow-ups they will actually ask
+- **"Add a global deadline."** Pass `deadline_s`; before each sleep, `remaining = deadline - elapsed`;
+  if `remaining <= 0`, stop; otherwise `sleep(min(delay, remaining))`. A per-call deadline is what
+  keeps a retry from blowing your SLO — the retry policy must be *inside* the timeout budget, not
+  outside it.
+- **"What about a retry budget / circuit breaker?"** Per-attempt retries multiply load exactly when
+  the dependency is already failing. Production answer: a token bucket of retries per client
+  (e.g. retries ≤ 10% of successful requests) plus a circuit breaker that trips to open after N
+  consecutive failures and lets one probe through per cool-down. Retries fix *isolated* failures;
+  they amplify *systemic* ones.
+- **"Async version?"** Same body, `async def`, `await asyncio.sleep(delay)`, and inject
+  `sleep: Callable[[float], Awaitable[None]]`. Do not use `time.sleep` in an async path — you block
+  the whole event loop and every other coroutine on it.
+- **"How do you retry a non-idempotent write?"** You do not. You attach an **idempotency key**
+  (see 6.13) so the server deduplicates the second attempt, or you make the sink a keyed upsert.
+
+#### Anchor to my experience
+> **Say it like this:** "This is exactly the shape I have in the TrueBalance scoring Lambda. It reads
+> from SQS and calls downstream, so retries are load-bearing: SQS is already at-least-once, so the
+> handler had to be idempotent anyway, which means an in-process retry is safe. The rule I hold is
+> retry transport and 429/5xx, never 4xx, and always with jitter — with ARM64 Lambdas scaling out on
+> queue depth, un-jittered backoff would just re-synchronise every concurrent invocation onto the
+> same dependency."
+
+---
+
+### 6.2 Token-bucket rate limiter (+ sliding-window log)
+
+#### Statement
+Implement a thread-safe rate limiter allowing `r` requests/second with burst capacity `c`. Then
+implement the sliding-window-log variant and explain when each is right.
+
+#### Clarifying questions
+- Should a caller **block** until a token is available, or get a `False` and shed load? (Serving path:
+  shed. Batch backfill: block.)
+- Is a burst acceptable, or is the limit a hard "never more than N in any window"? That is exactly
+  the token bucket vs sliding-window choice.
+- Per-process or per-fleet? Per-fleet means Redis, not a `threading.Lock`.
+
+#### Approach
+Token bucket, **lazy refill**: do not run a background thread ticking tokens; on each call compute
+`elapsed * rate` and top up, clamped at capacity. `time.monotonic()` so an NTP step cannot hand out
+free tokens. One `threading.Lock` around the whole read-modify-write — the critical section is
+nanoseconds, so contention is irrelevant compared to the network call it is guarding.
+
+Token bucket allows a burst of `capacity` and then settles to `rate` — that is usually what you
+*want* for an inference endpoint (absorb a spike, then smooth). A sliding-window log gives a hard
+"never more than N in any `w` seconds" at the cost of `O(N)` memory per key, which is the guarantee
+a third-party API's terms of service usually state.
+
+```python
+"""Token bucket + sliding-window log. Thread-safe, monotonic, clock-injectable."""
+from __future__ import annotations
+
+import threading
+import time
+from collections import deque
+from typing import Callable
+
+
+class TokenBucket:
+    """Allow `rate` ops/sec with a burst of `capacity`. Lazy refill, no background thread."""
+
+    def __init__(self, rate: float, capacity: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        if rate <= 0 or capacity <= 0:
+            raise ValueError("rate and capacity must be > 0")
+        self.rate = float(rate)
+        self.capacity = float(capacity)
+        self._clock = clock
+        self._tokens = float(capacity)      # start full: cold start should not be throttled
+        self._stamp = clock()
+        self._lock = threading.Lock()
+
+    def _refill_locked(self) -> None:
+        now = self._clock()
+        if now > self._stamp:               # monotonic: `now < stamp` cannot happen, but be safe
+            self._tokens = min(self.capacity, self._tokens + (now - self._stamp) * self.rate)
+        self._stamp = now
+
+    def try_acquire(self, n: float = 1.0) -> bool:
+        """Non-blocking. True if n tokens were taken."""
+        if n > self.capacity:
+            raise ValueError(f"n={n} exceeds capacity={self.capacity}; would never succeed")
+        with self._lock:
+            self._refill_locked()
+            if self._tokens >= n:
+                self._tokens -= n
+                return True
+            return False
+
+    def wait_time(self, n: float = 1.0) -> float:
+        """Seconds until n tokens exist. 0.0 if available now."""
+        if n > self.capacity:
+            raise ValueError("n exceeds capacity")
+        with self._lock:
+            self._refill_locked()
+            deficit = n - self._tokens
+            return 0.0 if deficit <= 0 else deficit / self.rate
+
+    def acquire(self, n: float = 1.0,
+                sleep: Callable[[float], None] = time.sleep) -> None:
+        """Blocking. Sleeps exactly as long as needed, then re-checks (other threads race us)."""
+        while True:
+            wait = self.wait_time(n)
+            if wait == 0.0 and self.try_acquire(n):
+                return
+            sleep(wait if wait > 0 else 0.0005)
+
+    @property
+    def tokens(self) -> float:
+        with self._lock:
+            self._refill_locked()
+            return self._tokens
+
+
+class SlidingWindowLog:
+    """Hard guarantee: at most `limit` events in any trailing `window` seconds. O(limit) memory."""
+
+    def __init__(self, limit: int, window: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.limit = int(limit)
+        self.window = float(window)
+        self._clock = clock
+        self._events: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            now = self._clock()
+            cutoff = now - self.window
+            while self._events and self._events[0] <= cutoff:
+                self._events.popleft()
+            if len(self._events) < self.limit:
+                self._events.append(now)
+                return True
+            return False
+
+    def retry_after(self) -> float:
+        """Seconds until the oldest event leaves the window (what you put in the 429 header)."""
+        with self._lock:
+            if len(self._events) < self.limit:
+                return 0.0
+            return max(0.0, self._events[0] + self.window - self._clock())
+
+
+# ---------------------------------------------------------------- tests
+class FakeClock:
+    def __init__(self, t: float = 1000.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def test_bucket_burst_then_rate() -> None:
+    clk = FakeClock()
+    tb = TokenBucket(rate=10.0, capacity=5.0, clock=clk)
+    assert [tb.try_acquire() for _ in range(5)] == [True] * 5     # burst of 5
+    assert tb.try_acquire() is False                              # bucket empty
+    assert abs(tb.wait_time() - 0.1) < 1e-9                       # 1 token @ 10/s
+    clk.advance(0.1)
+    assert tb.try_acquire() is True
+    clk.advance(100.0)
+    assert tb.tokens == 5.0                                       # clamped at capacity, no drift
+
+
+def test_bucket_fractional_and_oversized() -> None:
+    clk = FakeClock()
+    tb = TokenBucket(rate=2.0, capacity=4.0, clock=clk)
+    assert tb.try_acquire(2.5) is True
+    assert abs(tb.tokens - 1.5) < 1e-9
+    try:
+        tb.try_acquire(9)
+        raise AssertionError("should reject n > capacity")
+    except ValueError:
+        pass
+
+
+def test_blocking_acquire_uses_injected_sleep() -> None:
+    clk = FakeClock()
+    tb = TokenBucket(rate=4.0, capacity=1.0, clock=clk)
+    slept: list[float] = []
+
+    def sleep(s: float) -> None:
+        slept.append(s)
+        clk.advance(s)                       # the fake clock is what makes this terminate
+
+    tb.acquire()                             # free (bucket starts full)
+    tb.acquire(sleep=sleep)                  # must wait 1/4s
+    assert len(slept) == 1 and abs(slept[0] - 0.25) < 1e-9
+
+
+def test_sliding_window_is_hard() -> None:
+    clk = FakeClock()
+    sw = SlidingWindowLog(limit=3, window=1.0, clock=clk)
+    assert [sw.try_acquire() for _ in range(3)] == [True, True, True]
+    assert sw.try_acquire() is False
+    assert abs(sw.retry_after() - 1.0) < 1e-9
+    clk.advance(0.99)
+    assert sw.try_acquire() is False          # still inside the window: no burst leakage
+    clk.advance(0.02)
+    assert sw.try_acquire() is True
+
+
+def test_thread_safety_no_overdraw() -> None:
+    tb = TokenBucket(rate=1e-9, capacity=200.0)     # effectively no refill during the test
+    granted = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        got = sum(1 for _ in range(100) if tb.try_acquire())
+        with lock:
+            granted.append(got)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(granted) == 200                       # exactly capacity, never 201
+
+
+for t in (test_bucket_burst_then_rate, test_bucket_fractional_and_oversized,
+          test_blocking_acquire_uses_injected_sleep, test_sliding_window_is_hard,
+          test_thread_safety_no_overdraw):
+    t()
+print("6.2 rate limiter: all tests passed")
+```
+
+#### Complexity
+Token bucket: `O(1)` time and `O(1)` space per bucket — this is why it is the default. Sliding-window
+log: `O(1)` amortised time (each event is appended once, popped once) but `O(limit)` space per key,
+which becomes `O(keys × limit)` across a fleet of tenants — the reason nobody runs a log per API key
+at scale. Middle ground: **sliding-window counter** (current + previous fixed window, weighted by how
+far into the current window you are) — `O(1)` space, small bounded error at the boundary.
+
+#### Follow-ups
+- **"Now make it distributed."** Redis with a Lua script so refill-and-take is atomic:
+  `HMGET key tokens stamp` → compute → `HMSET` + `PEXPIRE`, all inside one `EVAL`. Never do it as
+  GET/compute/SET from Python — that read-modify-write is a race and you *will* over-admit under
+  load. Redis 7 ships `CL.THROTTLE` via RedisCell / redis-cell if you want it off the shelf.
+  Trade-off: every admission decision is now a network round trip; at high RPS people run a local
+  bucket sized at `global_rate / replica_count` and accept the imprecision during scale events.
+- **"What if replicas scale up and down?"** Static per-replica division breaks. Either a shared
+  Redis bucket, or a coordinator that leases quota chunks (each replica takes 100 permits at a time
+  and re-leases) — far fewer round trips, and self-correcting.
+- **"Per-tenant limits with a lot of tenants?"** A dict of buckets plus an LRU/TTL eviction (that's
+  6.3) so an idle tenant's bucket does not live forever. Bucket state is 2 floats — cheap — but the
+  dict of 10M tenant ids is not.
+
+#### Anchor to my experience
+> **Say it like this:** "The version of this I care about most is protecting a *downstream* from my
+> own fan-out. On the TrueBalance scoring path the Lambda consumers scale with SQS depth, so the
+> limiter that matters is the one in front of the shared dependency, not the one in front of my
+> endpoint. And for cost work — the multi-container SageMaker endpoints I built at Tiger, where
+> several models share the same infrastructure — a per-model token bucket is what stops one noisy
+> model from eating the shared capacity and blowing another model's SLA."
+
+---
+
+### 6.3 LRU cache with TTL, from scratch
+
+#### Statement
+Implement an LRU cache with per-entry TTL: `get`, `set`, bounded size, expiry. Then compare with
+`functools.lru_cache` and say why you would not just use it.
+
+#### Clarifying questions
+- Is TTL per entry or global? Should `get` on an expired entry evict it, or return stale-while-
+  revalidate?
+- Thread-safe required? (In an ML serving process behind a thread pool: yes.)
+- Do we need a hit/miss counter? (Yes — an unobserved cache is a liability; you need the hit rate on
+  a dashboard before you can defend the memory it costs.)
+
+#### Approach
+`OrderedDict` gives O(1) LRU: `move_to_end(key)` on access, `popitem(last=False)` to evict the
+coldest. Store `(expires_at, value)`. Expire **lazily** on read plus an explicit `purge()` for a
+janitor thread — a background sweeper over the whole dict is `O(n)` and stalls request threads.
+
+The interesting part is the comparison. `functools.lru_cache` is excellent and I use it, but it has
+three sharp edges that matter in an ML service:
+
+| | `functools.lru_cache` | this |
+|---|---|---|
+| TTL | none — an entry lives until evicted | per-entry |
+| `maxsize=None` | **unbounded**: a genuine memory leak on an unbounded key space (user ids, request ids) | always bounded |
+| On methods | caches `self` as part of the key → the instance is **never garbage collected**; a per-request object cached this way leaks the whole object graph | you choose the key |
+| Unhashable args | `TypeError` on a dict/list argument | you choose the key function |
+| Invalidation | `cache_clear()` only — all or nothing | per key |
+| Introspection | `cache_info()` | full stats + size |
+
+```python
+"""Bounded LRU cache with per-entry TTL. O(1) get/set. Lazy expiry + explicit purge."""
+from __future__ import annotations
+
+import threading
+import time
+from collections import OrderedDict
+from typing import Any, Callable, Hashable
+
+_MISSING = object()
+
+
+class TTLCache:
+    def __init__(self, maxsize: int = 128, ttl: float = 60.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        if maxsize < 1:
+            raise ValueError("maxsize must be >= 1")
+        self.maxsize = maxsize
+        self.ttl = float(ttl)
+        self._clock = clock
+        self._data: OrderedDict[Hashable, tuple[float, Any]] = OrderedDict()
+        self._lock = threading.RLock()
+        self.hits = self.misses = self.evictions = self.expirations = 0
+
+    def get(self, key: Hashable, default: Any = None) -> Any:
+        with self._lock:
+            entry = self._data.get(key, _MISSING)
+            if entry is _MISSING:
+                self.misses += 1
+                return default
+            expires_at, value = entry            # type: ignore[misc]
+            if expires_at <= self._clock():
+                del self._data[key]
+                self.expirations += 1
+                self.misses += 1
+                return default
+            self._data.move_to_end(key)          # mark as most-recently-used
+            self.hits += 1
+            return value
+
+    def set(self, key: Hashable, value: Any, ttl: float | None = None) -> None:
+        with self._lock:
+            expires_at = self._clock() + (self.ttl if ttl is None else ttl)
+            if key in self._data:
+                self._data.move_to_end(key)
+            self._data[key] = (expires_at, value)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)   # pop the coldest
+                self.evictions += 1
+
+    def delete(self, key: Hashable) -> bool:
+        with self._lock:
+            return self._data.pop(key, _MISSING) is not _MISSING
+
+    def purge(self) -> int:
+        """Drop every expired entry. O(n) — call from a janitor, never from a request path."""
+        with self._lock:
+            now = self._clock()
+            dead = [k for k, (exp, _) in self._data.items() if exp <= now]
+            for k in dead:
+                del self._data[k]
+            self.expirations += len(dead)
+            return len(dead)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            total = self.hits + self.misses
+            return {"size": len(self._data), "maxsize": self.maxsize,
+                    "hits": self.hits, "misses": self.misses,
+                    "evictions": self.evictions, "expirations": self.expirations,
+                    "hit_rate": round(self.hits / total, 4) if total else 0.0}
+
+
+def memoize_ttl(maxsize: int = 128, ttl: float = 60.0,
+                key_fn: Callable[..., Hashable] | None = None,
+                clock: Callable[[], float] = time.monotonic):
+    """Decorator form. key_fn lets you exclude `self` or normalise unhashable args."""
+    cache = TTLCache(maxsize=maxsize, ttl=ttl, clock=clock)
+
+    def deco(fn):
+        def make_key(args, kwargs):
+            return (args, tuple(sorted(kwargs.items()))) if key_fn is None else key_fn(*args, **kwargs)
+
+        def wrapper(*args, **kwargs):
+            k = make_key(args, kwargs)
+            hit = cache.get(k, _MISSING)
+            if hit is not _MISSING:
+                return hit
+            value = fn(*args, **kwargs)
+            cache.set(k, value)
+            return value
+
+        wrapper.cache = cache          # type: ignore[attr-defined]
+        wrapper.__name__ = getattr(fn, "__name__", "wrapped")
+        return wrapper
+
+    return deco
+
+
+# ---------------------------------------------------------------- tests
+class FakeClock:
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def test_lru_order() -> None:
+    clk = FakeClock()
+    c = TTLCache(maxsize=3, ttl=1000.0, clock=clk)
+    for k in "abc":
+        c.set(k, k.upper())
+    assert c.get("a") == "A"          # touching 'a' makes 'b' the coldest
+    c.set("d", "D")
+    assert c.get("b") is None         # 'b' evicted, not 'a'
+    assert c.get("a") == "A" and c.get("c") == "C" and c.get("d") == "D"
+    assert c.stats()["evictions"] == 1
+
+
+def test_ttl_expiry_is_lazy_and_counted() -> None:
+    clk = FakeClock()
+    c = TTLCache(maxsize=10, ttl=5.0, clock=clk)
+    c.set("model:v3", {"threshold": 0.62})
+    clk.advance(4.99)
+    assert c.get("model:v3") == {"threshold": 0.62}
+    clk.advance(0.02)
+    assert c.get("model:v3") is None
+    assert c.stats()["expirations"] == 1
+    assert len(c) == 0                # expired entry actually removed, not just hidden
+
+
+def test_per_entry_ttl_and_purge() -> None:
+    clk = FakeClock()
+    c = TTLCache(maxsize=10, ttl=100.0, clock=clk)
+    c.set("short", 1, ttl=1.0)
+    c.set("long", 2)
+    clk.advance(2.0)
+    assert c.purge() == 1
+    assert len(c) == 1 and c.get("long") == 2
+
+
+def test_update_refreshes_ttl_and_recency() -> None:
+    clk = FakeClock()
+    c = TTLCache(maxsize=2, ttl=10.0, clock=clk)
+    c.set("x", 1)
+    c.set("y", 2)
+    clk.advance(9.0)
+    c.set("x", 11)                    # refresh
+    c.set("z", 3)                     # evicts the colder 'y'
+    assert c.get("y") is None and c.get("x") == 11
+    clk.advance(5.0)
+    assert c.get("x") == 11           # x's TTL restarted at the write
+
+
+def test_decorator_excludes_self() -> None:
+    clk = FakeClock()
+    calls = {"n": 0}
+
+    class Scorer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        @memoize_ttl(maxsize=8, ttl=3.0, clock=clk,
+                     key_fn=lambda self, feature: feature)     # `self` deliberately NOT in the key
+        def lookup(self, feature: str) -> str:
+            calls["n"] += 1
+            return f"{feature}=1"
+
+    a, b = Scorer("a"), Scorer("b")
+    assert a.lookup("age") == "age=1"
+    assert b.lookup("age") == "age=1"
+    assert calls["n"] == 1            # shared across instances; instances stay collectable
+    clk.advance(3.5)
+    assert a.lookup("age") == "age=1"
+    assert calls["n"] == 2            # expired, recomputed
+
+
+for t in (test_lru_order, test_ttl_expiry_is_lazy_and_counted, test_per_entry_ttl_and_purge,
+          test_update_refreshes_ttl_and_recency, test_decorator_excludes_self):
+    t()
+print("6.3 TTLCache: all tests passed")
+```
+
+#### Complexity
+`get` / `set` / `delete`: `O(1)` amortised — `OrderedDict` is a hash map plus a doubly linked list,
+so `move_to_end` and `popitem(last=False)` are pointer swaps. `purge`: `O(n)`. Space: `O(maxsize)`
+entries, each holding a float and a strong reference to the value — that last part is the memory
+risk: caching a 200 MB feature frame under 100 keys is 20 GB, and `maxsize` counts *entries*, not
+bytes. If values vary in size, weigh by `sys.getsizeof` or an explicit cost and evict by weight.
+
+#### Follow-ups
+- **"Why not `functools.lru_cache`?"** Use it for pure, small, bounded-key-space functions. Do not
+  use it with `maxsize=None` on request-derived keys (unbounded growth = leak), and be careful on
+  methods (`self` in the key pins the instance). And it has no TTL, so a cached model threshold
+  survives your config rollout — the classic "the fix deployed but nothing changed" incident.
+- **"Stale-while-revalidate?"** Keep `soft_ttl < hard_ttl`: past soft, return the stale value *and*
+  kick off an async refresh; past hard, block. This is the right pattern in front of a feature store,
+  because a 50ms-stale feature is nearly always better than a 400ms p99.
+- **"Thundering herd on a cold key?"** Single-flight: a per-key `threading.Event`; the first caller
+  computes, the rest wait on the event instead of all calling the origin.
+- **"Cache the negative results?"** Yes, with a shorter TTL — otherwise a missing entity hammers the
+  origin on every request.
+
+---
+
+### 6.4 Batching iterators: fixed, size-aware, and time-flushed
+
+#### Statement
+(a) Chunk an iterable into batches of `n`. (b) Now cap batches by a **cost budget** (tokens/bytes),
+not a count. (c) Now flush on "50 items **or** 200 ms, whichever comes first."
+
+#### Clarifying questions
+- Is the input a finite iterable or a live stream? (Changes (c) from nice-to-have to mandatory.)
+- What happens to a single item that exceeds the budget on its own? (Emit alone and let the caller
+  reject it? Truncate? Raise? Never silently drop.)
+- Is order preserved / must batches be homogeneous (e.g. same model version)?
+
+#### Approach
+(a) is `islice` in a loop — note that `itertools.batched` exists but only from **3.12**, so on 3.11
+you write it. (b) is the actual ML-inference batching problem: a GPU or an LLM endpoint is limited
+by *tokens*, not by request count, so a batch of 32 tiny prompts and a batch of 32 huge ones are
+wildly different. (c) is the latency/throughput knob: bigger batches raise throughput and raise tail
+latency, so you bound the wait.
+
+For (c) I deliberately keep the batcher **passive and clock-injected** — `add()` returns a batch when
+one is ready, `flush_due()` is called by the caller's loop. Threads and timers inside the data
+structure would make it untestable; the concurrency belongs one layer up (see 6.9).
+
+```python
+"""Three batchers: fixed size, cost-budgeted, and size-or-deadline micro-batching."""
+from __future__ import annotations
+
+import time
+from itertools import islice
+from typing import Any, Callable, Iterable, Iterator
+
+
+# (a) fixed-size ---------------------------------------------------------
+def batched(iterable: Iterable[Any], n: int) -> Iterator[list[Any]]:
+    """Yield lists of length n; the final batch may be shorter. itertools.batched is 3.12+."""
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    it = iter(iterable)
+    while True:
+        chunk = list(islice(it, n))
+        if not chunk:
+            return
+        yield chunk
+
+
+# (b) cost-budgeted ------------------------------------------------------
+def cost_batched(items: Iterable[Any], cost_fn: Callable[[Any], float],
+                 max_cost: float, max_items: int | None = None,
+                 oversize: str = "isolate") -> Iterator[list[Any]]:
+    """Batch by a cost budget (tokens/bytes), optionally also capping item count.
+
+    oversize: 'isolate' -> an item costing more than max_cost is emitted in a batch of one
+              'raise'   -> refuse it loudly
+    """
+    if max_cost <= 0:
+        raise ValueError("max_cost must be > 0")
+    batch: list[Any] = []
+    total = 0.0
+    for item in items:
+        c = float(cost_fn(item))
+        if c > max_cost:
+            if oversize == "raise":
+                raise ValueError(f"item cost {c} exceeds max_cost {max_cost}")
+            if batch:
+                yield batch
+                batch, total = [], 0.0
+            yield [item]                      # caller decides: truncate, split, or reject
+            continue
+        over_cost = batch and total + c > max_cost
+        over_count = max_items is not None and len(batch) >= max_items
+        if over_cost or over_count:
+            yield batch
+            batch, total = [], 0.0
+        batch.append(item)
+        total += c
+    if batch:
+        yield batch
+
+
+# (c) size-or-deadline micro-batcher -------------------------------------
+class MicroBatcher:
+    """Flush when max_items reached, cost budget reached, or max_delay elapsed since batch open.
+
+    Passive by design: `add` may return a batch, and the driver loop must call `flush_due`
+    (and `drain` at shutdown). No threads inside => fully deterministic tests.
+    """
+
+    def __init__(self, max_items: int = 50, max_delay: float = 0.2,
+                 max_cost: float | None = None,
+                 cost_fn: Callable[[Any], float] = lambda _x: 1.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.max_items = max_items
+        self.max_delay = max_delay
+        self.max_cost = max_cost
+        self.cost_fn = cost_fn
+        self._clock = clock
+        self._buf: list[Any] = []
+        self._cost = 0.0
+        self._opened_at: float | None = None
+
+    def add(self, item: Any) -> list[Any] | None:
+        if not self._buf:
+            self._opened_at = self._clock()          # deadline starts at the FIRST item
+        self._buf.append(item)
+        self._cost += float(self.cost_fn(item))
+        if len(self._buf) >= self.max_items or (
+                self.max_cost is not None and self._cost >= self.max_cost):
+            return self._take()
+        return None
+
+    def flush_due(self) -> list[Any] | None:
+        if self._buf and self._opened_at is not None and \
+                self._clock() - self._opened_at >= self.max_delay:
+            return self._take()
+        return None
+
+    def time_to_deadline(self) -> float | None:
+        """What to pass as the poll timeout in the driver loop. None if nothing is buffered."""
+        if not self._buf or self._opened_at is None:
+            return None
+        return max(0.0, self._opened_at + self.max_delay - self._clock())
+
+    def drain(self) -> list[Any]:
+        return self._take() or []
+
+    def _take(self) -> list[Any] | None:
+        if not self._buf:
+            return None
+        out, self._buf, self._cost, self._opened_at = self._buf, [], 0.0, None
+        return out
+
+
+# ---------------------------------------------------------------- tests
+class FakeClock:
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def test_fixed_batches() -> None:
+    assert list(batched(range(7), 3)) == [[0, 1, 2], [3, 4, 5], [6]]
+    assert list(batched([], 3)) == []
+    assert list(batched(range(3), 10)) == [[0, 1, 2]]
+    # lazy: does not materialise an infinite source
+    inf = iter(int, 1)                                # endless zeros
+    first = next(batched(inf, 4))
+    assert first == [0, 0, 0, 0]
+
+
+def test_cost_batches() -> None:
+    prompts = ["a" * 300, "b" * 300, "c" * 500, "d" * 100]
+    out = list(cost_batched(prompts, len, max_cost=800))
+    assert [sum(map(len, b)) for b in out] == [600, 600]
+    # count cap can bite before the cost cap
+    out2 = list(cost_batched(range(10), lambda _x: 1.0, max_cost=100.0, max_items=4))
+    assert [len(b) for b in out2] == [4, 4, 2]
+
+
+def test_oversize_item_isolated() -> None:
+    items = [10, 10, 500, 10]
+    out = list(cost_batched(items, float, max_cost=100.0))
+    assert out == [[10, 10], [500], [10]]
+    try:
+        list(cost_batched([500], float, max_cost=100.0, oversize="raise"))
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_microbatcher_size_trigger() -> None:
+    clk = FakeClock()
+    mb = MicroBatcher(max_items=3, max_delay=1.0, clock=clk)
+    assert mb.add("a") is None and mb.add("b") is None
+    assert mb.add("c") == ["a", "b", "c"]
+    assert mb.flush_due() is None                     # buffer empty again
+
+
+def test_microbatcher_deadline_trigger() -> None:
+    clk = FakeClock()
+    mb = MicroBatcher(max_items=50, max_delay=0.2, clock=clk)
+    mb.add("x")
+    clk.advance(0.1)
+    mb.add("y")
+    assert mb.flush_due() is None                     # deadline is from the FIRST item, 0.1 left
+    assert abs(mb.time_to_deadline() - 0.1) < 1e-9
+    clk.advance(0.1)
+    assert mb.flush_due() == ["x", "y"]
+
+
+def test_microbatcher_token_budget_and_drain() -> None:
+    clk = FakeClock()
+    mb = MicroBatcher(max_items=100, max_delay=9.0, max_cost=1000,
+                      cost_fn=lambda s: len(s), clock=clk)
+    assert mb.add("a" * 600) is None
+    assert mb.add("b" * 600) == ["a" * 600, "b" * 600]   # 1200 >= 1000, flush
+    mb.add("tail")
+    assert mb.drain() == ["tail"] and mb.drain() == []
+
+
+for t in (test_fixed_batches, test_cost_batches, test_oversize_item_isolated,
+          test_microbatcher_size_trigger, test_microbatcher_deadline_trigger,
+          test_microbatcher_token_budget_and_drain):
+    t()
+print("6.4 batchers: all tests passed")
+```
+
+#### Complexity
+All three are `O(1)` amortised per item and `O(batch_size)` space — never `O(n)`, because each is a
+generator or a bounded buffer. `batched` over an infinite iterator is safe (the test proves it).
+The subtlety is the **latency**: a micro-batcher adds up to `max_delay` to the p99 of the *first*
+item in a batch. That is the trade you are explicitly buying.
+
+#### Follow-ups
+- **"Pick `max_delay` and `max_items`."** Measure: throughput rises with batch size until the
+  accelerator saturates, then flattens; latency rises linearly the whole way. Choose the smallest
+  batch that reaches ~90% of peak throughput, then set `max_delay` to whatever eats ≤10–20% of your
+  p99 budget. Emit `batch_size` and `wait_time` as histograms — if `max_delay` fires more often than
+  `max_items`, you are under-loaded and should shrink the batch.
+- **"Batch by shape."** Padding cost: batching a 12-token prompt with a 4,000-token prompt wastes the
+  whole batch on padding. Bucket by length first (that is what `cost_fn` plus a per-bucket batcher
+  gives you), which is exactly how serving stacks do length-bucketed batching.
+- **"Ordering."** If you batch, you must carry a correlation id per item and scatter results back;
+  a batcher that returns results positionally is one refactor away from returning person A's score
+  to person B.
+
+#### Anchor to my experience
+> **Say it like this:** "Cost-aware batching is the version I actually needed. On the ResMed RAG
+> pipeline the unit that mattered was tokens per request, not requests — a count-based batcher was
+> the wrong abstraction because one long medical report could be worth thirty short ones. And on the
+> event-driven scoring path at TrueBalance, SQS already hands you batches, so the equivalent knob is
+> the batch size and visibility timeout: same trade, throughput against tail latency."
+
+---
+### 6.5 Streaming aggregation over a multi-GB file
+
+#### Statement
+A 40 GB JSONL file of scoring events: `{"model":"loan_v3","latency_ms":41.2,"score":0.71}`.
+Compute per-model **count, sum, mean, variance, min, max and p95** without loading it into memory.
+
+#### Clarifying questions
+- Does p95 have to be **exact**, or is a bounded relative error acceptable? This is the whole
+  design decision, so I ask it first.
+- How many distinct keys? (Bounded — dozens of models — means per-key state is fine. Millions of
+  keys means the *keys* are the memory problem, not the values.)
+- Single pass, or may I pre-sort / do two passes? Is the file on local disk or S3?
+- Malformed lines: skip and count, or fail the job? (Always: skip, count, and expose the count —
+  a silent skip is how you ship a model trained on 60% of the data.)
+
+#### Approach
+Generators the whole way down: `open()` is already a lazy line iterator, so the pipeline
+`lines -> parsed -> aggregated` never holds more than one record. Mean and variance via **Welford's
+online algorithm**, which is numerically stable — the naive `sum(x^2) - n*mean^2` catastrophically
+cancels when values are large and variance is small.
+
+Percentiles are where you show judgement. Four honest options:
+
+| Method | Memory | Error | When |
+|---|---|---|---|
+| Sort everything | `O(n)` | exact | n small, or you have Spark and can pay for the shuffle |
+| Bounded top-M min-heap | `O((1-q)*n)` | **exact** | you know `n` up front, and q is high (p95, p99) |
+| DDSketch-style log buckets | `O(log(max/min)/alpha)` — a few KB | <= alpha **relative** | streaming, unknown n. The production answer |
+| Reservoir sample | `O(k)` | sampling error, unbounded in the tail | you want a sample for *other* reasons too |
+
+There is a trap in the heap version that I call out deliberately, because getting it wrong is silent:
+the number of elements you must retain, `M = n - floor(q*(n-1))`, **grows with n**. If you recompute
+`M` as the stream grows and pop when the heap exceeds the *current* `M`, you throw away elements you
+will need later, and the answer is quietly wrong. So the heap method is only exact when `n` is known
+in advance. Otherwise use the sketch.
+
+```python
+"""Single-pass per-key aggregation over a large JSONL file: Welford + DDSketch percentiles."""
+from __future__ import annotations
+
+import json
+import math
+import os
+import random
+import tempfile
+from dataclasses import dataclass, field
+from typing import Iterable, Iterator
+
+
+# ---------------------------------------------------------------- percentile sketch
+class DDSketch:
+    """Log-bucketed sketch with a *relative* error guarantee of alpha on every quantile.
+
+    bucket(v) = ceil(log(v)/log(gamma)) with gamma = (1+a)/(1-a); the estimate for bucket k is
+    2*gamma**k/(gamma+1), which is within relative error alpha of any value in that bucket.
+    Memory is O(occupied buckets) ~ log(max/min)/log(gamma): a few thousand ints for latencies
+    spanning microseconds to minutes at 1% error.
+    """
+
+    __slots__ = ("alpha", "gamma", "_lg", "bins", "zeros", "n")
+
+    def __init__(self, alpha: float = 0.01) -> None:
+        if not 0 < alpha < 1:
+            raise ValueError("alpha must be in (0,1)")
+        self.alpha = alpha
+        self.gamma = (1 + alpha) / (1 - alpha)
+        self._lg = math.log(self.gamma)
+        self.bins: dict[int, int] = {}
+        self.zeros = 0
+        self.n = 0
+
+    def add(self, v: float) -> None:
+        if v < 0:
+            raise ValueError("non-negative only; keep a second sketch for negatives")
+        self.n += 1
+        if v == 0.0:
+            self.zeros += 1
+            return
+        k = math.ceil(math.log(v) / self._lg)
+        self.bins[k] = self.bins.get(k, 0) + 1
+
+    def merge(self, other: "DDSketch") -> "DDSketch":
+        """Sketches are mergeable -> map/reduce across shards or Spark partitions for free."""
+        if other.gamma != self.gamma:
+            raise ValueError("cannot merge sketches with different alpha")
+        for k, c in other.bins.items():
+            self.bins[k] = self.bins.get(k, 0) + c
+        self.zeros += other.zeros
+        self.n += other.n
+        return self
+
+    def quantile(self, q: float) -> float:
+        if self.n == 0:
+            raise ValueError("empty sketch")
+        rank = q * (self.n - 1)
+        cum = self.zeros
+        if cum > rank:
+            return 0.0
+        for k in sorted(self.bins):
+            cum += self.bins[k]
+            if cum > rank:
+                return 2 * self.gamma ** k / (self.gamma + 1)
+        return 2 * self.gamma ** max(self.bins) / (self.gamma + 1)
+
+    def nbytes_ish(self) -> int:
+        return len(self.bins) * 64          # rough: dict entry overhead
+
+
+# ---------------------------------------------------------------- per-key accumulator
+@dataclass
+class Acc:
+    n: int = 0
+    total: float = 0.0
+    mean: float = 0.0
+    m2: float = 0.0                          # Welford's sum of squared deviations
+    lo: float = math.inf
+    hi: float = -math.inf
+    sketch: DDSketch = field(default_factory=lambda: DDSketch(0.01))
+
+    def add(self, x: float) -> None:
+        self.n += 1
+        self.total += x
+        delta = x - self.mean
+        self.mean += delta / self.n
+        self.m2 += delta * (x - self.mean)   # uses the UPDATED mean; that is the whole trick
+        if x < self.lo:
+            self.lo = x
+        if x > self.hi:
+            self.hi = x
+        self.sketch.add(x)
+
+    @property
+    def variance(self) -> float:             # sample variance
+        return self.m2 / (self.n - 1) if self.n > 1 else 0.0
+
+    def summary(self) -> dict[str, float]:
+        return {"count": self.n, "mean": round(self.mean, 3),
+                "std": round(math.sqrt(self.variance), 3),
+                "min": round(self.lo, 3), "max": round(self.hi, 3),
+                "p50": round(self.sketch.quantile(0.50), 3),
+                "p95": round(self.sketch.quantile(0.95), 3),
+                "p99": round(self.sketch.quantile(0.99), 3)}
+
+
+# ---------------------------------------------------------------- the pipeline
+def read_jsonl(path: str) -> Iterator[tuple[dict, int]]:
+    """Lazy. Yields (record, line_no). Never holds more than one line in memory."""
+    with open(path, "r", encoding="utf-8") as fh:
+        for i, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line), i
+            except json.JSONDecodeError:
+                yield {"__bad__": True}, i
+
+
+def aggregate(records: Iterable[tuple[dict, int]], key: str, value: str
+              ) -> tuple[dict[str, Acc], dict[str, int]]:
+    accs: dict[str, Acc] = {}
+    rejects = {"bad_json": 0, "missing_field": 0, "non_numeric": 0}
+    for rec, _ln in records:
+        if rec.get("__bad__"):
+            rejects["bad_json"] += 1
+            continue
+        if key not in rec or value not in rec:
+            rejects["missing_field"] += 1
+            continue
+        v = rec[value]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:  # v!=v catches NaN
+            rejects["non_numeric"] += 1
+            continue
+        accs.setdefault(str(rec[key]), Acc()).add(float(v))
+    return accs, rejects
+
+
+# ---------------------------------------------------------------- exact alternatives
+def exact_quantile_known_n(values: Iterable[float], q: float, n: int) -> float:
+    """EXACT high quantile in one pass, O((1-q)n) memory -- ONLY valid when n is known.
+
+    Keeps the M largest values in a min-heap, M = n - floor(q*(n-1)); the heap root is then
+    precisely the element at sorted index floor(q*(n-1)).
+    Recomputing M as the stream grows is WRONG: M increases and the popped elements are gone.
+    That bug is silent, which is exactly why the sketch is the streaming answer.
+    """
+    import heapq
+    m = n - math.floor(q * (n - 1))
+    heap: list[float] = []
+    for v in values:
+        if len(heap) < m:
+            heapq.heappush(heap, v)
+        elif v > heap[0]:
+            heapq.heapreplace(heap, v)
+    return heap[0]
+
+
+def reservoir_sample(values: Iterable[float], k: int, rng: random.Random) -> list[float]:
+    """Algorithm R: uniform sample of size k, O(n) time, O(k) memory, one pass, unknown n."""
+    res: list[float] = []
+    for i, v in enumerate(values):
+        if i < k:
+            res.append(v)
+        else:
+            j = rng.randrange(i + 1)
+            if j < k:
+                res[j] = v
+    return res
+
+
+# ---------------------------------------------------------------- demo + checks
+def _write_fixture(path: str, rng: random.Random, n_per_model: int = 20000) -> list[float]:
+    latencies_v3: list[float] = []
+    with open(path, "w", encoding="utf-8") as fh:
+        for i in range(n_per_model):
+            lat = max(0.5, rng.lognormvariate(3.2, 0.55))        # skewed, like real latency
+            latencies_v3.append(lat)
+            fh.write(json.dumps({"model": "loan_v3", "latency_ms": lat,
+                                 "score": rng.random()}) + "\n")
+            fh.write(json.dumps({"model": "loan_v2",
+                                 "latency_ms": max(0.5, rng.lognormvariate(3.6, 0.5)),
+                                 "score": rng.random()}) + "\n")
+            if i % 5000 == 0:
+                fh.write("{not json at all\n")                    # poison line
+                fh.write(json.dumps({"model": "loan_v3"}) + "\n")  # missing latency
+    return latencies_v3
+
+
+def main() -> None:
+    rng = random.Random(2026)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "events.jsonl")
+        truth = _write_fixture(path, rng)
+
+        accs, rejects = aggregate(read_jsonl(path), key="model", value="latency_ms")
+        print(f"file={os.path.getsize(path)/1e6:.2f} MB  keys={sorted(accs)}  rejects={rejects}")
+        for k in sorted(accs):
+            print(f"  {k}: {accs[k].summary()}")
+
+        # --- streaming stats vs the in-memory truth
+        a = accs["loan_v3"]
+        assert a.n == len(truth)
+        exact_mean = sum(truth) / len(truth)
+        assert abs(a.mean - exact_mean) < 1e-9, (a.mean, exact_mean)
+        exact_var = sum((x - exact_mean) ** 2 for x in truth) / (len(truth) - 1)
+        assert abs(a.variance - exact_var) / exact_var < 1e-9
+
+        # --- sketch accuracy within the promised RELATIVE error
+        srt = sorted(truth)
+        for q in (0.5, 0.9, 0.95, 0.99):
+            exact = srt[math.floor(q * (len(srt) - 1))]
+            est = a.sketch.quantile(q)
+            rel = abs(est - exact) / exact
+            assert rel <= a.sketch.alpha * 1.5, (q, exact, est, rel)
+            print(f"  p{int(q*100)}: exact={exact:.3f} sketch={est:.3f} rel_err={rel*100:.3f}%")
+        print(f"  sketch: {len(a.sketch.bins)} buckets (~{a.sketch.nbytes_ish()} bytes) "
+              f"for {a.n} values")
+
+        # --- exact heap method, valid because n is known here
+        assert abs(exact_quantile_known_n(truth, 0.95, len(truth))
+                   - srt[math.floor(0.95 * (len(srt) - 1))]) < 1e-12
+
+        # --- sketches merge -> this parallelises across shards for free
+        s1, s2 = DDSketch(0.01), DDSketch(0.01)
+        for i, v in enumerate(truth):
+            (s1 if i % 2 == 0 else s2).add(v)
+        merged = DDSketch(0.01).merge(s1).merge(s2)
+        assert merged.n == len(truth)
+        assert abs(merged.quantile(0.95) - a.sketch.quantile(0.95)) < 1e-9
+
+        # --- reservoir sample is unbiased enough to trust for a mean
+        samp = reservoir_sample(truth, 2000, random.Random(7))
+        assert len(samp) == 2000
+        assert abs(sum(samp) / 2000 - exact_mean) / exact_mean < 0.05
+
+    print("6.5 streaming aggregation: all checks passed")
+
+
+main()
+```
+
+#### Complexity
+`add` is `O(1)`; `quantile` is `O(b log b)` for `b` occupied buckets, paid per query not per record.
+Space is the money line: `O(keys x buckets)` — **independent of n**, a few KB per key whether the
+file is 4 GB or 400 GB. The exact-heap variant is `O(n log M)` time / `O((1-q)n)` space; sorting is
+`O(n log n)` / `O(n)` and is the thing you are being asked to avoid.
+
+#### Follow-ups
+- **"How accurate is p95 really?"** DDSketch guarantees **relative** error on the value: at
+  alpha = 0.01, a true p95 of 100 ms is reported inside [99, 101] ms. That is the right guarantee for
+  latency because you care about ratios. A fixed-width histogram gives absolute error instead — fine
+  for scores in [0,1], bad for latency spanning four orders of magnitude. t-digest is better at the
+  extreme tail (p999) with a fuzzier guarantee. Say the trade honestly; never call a sketch "exact".
+- **"Millions of keys?"** Then the *keys* are the leak. Shard by key hash, or keep exact stats only
+  for the top-K keys (Space-Saving, 6.6) and roll the rest into `__other__`.
+- **"Make it parallel."** Both structures are **mergeable** — Welford merges with
+  `M2 = M2a + M2b + delta^2 * na*nb/n`. Mergeability is precisely why Spark/Deequ use these shapes:
+  a mergeable accumulator is a reducer.
+- **"Gzip / S3?"** `gzip.open` is still a lazy line iterator. For S3, stream the body in chunks and
+  split lines yourself — never `.read()`.
+
+#### Anchor to my experience
+> **Say it like this:** "This is the shape of the data-quality and drift jobs I ran on Azure
+> Databricks at Tiger with Deequ — per-column counts, null rates and distribution stats over tables
+> far too big to collect to the driver, using mergeable aggregators for exactly this reason. When I
+> needed the same thing outside Spark at ResMed, my drift-monitoring utility pulled feature
+> statistics out of Snowflake and provisioned Datadog dashboards and monitors from them, so the
+> per-feature state had to be a small fixed-size summary — a sketch, not a sample."
+
+---
+
+### 6.6 Log parsing, time bucketing, and top-N error signatures
+
+#### Statement
+Given application logs, extract the error lines, **normalise each message into a signature** (so
+`user 8412 not found` and `user 9931 not found` are the same problem), bucket by 5-minute window,
+and return the top-N signatures per window. Then make it memory-bounded for an unbounded stream.
+
+#### Clarifying questions
+- Fixed format (logfmt/JSON) or free text? Multi-line stack traces?
+- Top-N per window or globally? Do late-arriving lines matter?
+- May the counts be approximate? (For alerting, yes — you need the *ranking*, not the exact count.)
+
+#### Approach
+Parse with one compiled regex, then **normalise aggressively** before counting: UUIDs, hex ids, IPs,
+quoted strings, paths, durations and bare numbers all become placeholders. Un-normalised messages
+produce a top-N list of a thousand distinct one-count entries, which is useless — the normalisation
+*is* the feature. Then a `Counter` per window and `most_common(n)`.
+
+For an unbounded stream an exact `Counter` grows with the number of distinct signatures, which a bad
+deploy can make unbounded. Two sketches solve it:
+
+- **Space-Saving** (implemented below): `k` counters; guaranteed to retain every item with true
+  frequency above `n/k`, with a per-item error bound (`count - err <= true <= count`). It returns
+  *items*, which is what top-N means.
+- **Count-Min sketch**: a `d x w` counter matrix, `O(1)` update, `true <= est <= true + eps*n` with
+  probability `1 - delta`. It answers "how often did X occur" but cannot enumerate heavy hitters
+  without a companion heap. It never under-counts, so it is safe behind an alert threshold.
+
+```python
+"""Log -> normalised error signatures -> per-window top-N, exact and memory-bounded."""
+from __future__ import annotations
+
+import re
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from typing import Iterable, Iterator
+
+LINE_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+"
+    r"level=(?P<level>[A-Z]+)\s+"
+    r"service=(?P<service>[\w.-]+)\s+"
+    r"(?:trace=(?P<trace>[0-9a-f]+)\s+)?"
+    r'msg="(?P<msg>(?:[^"\\]|\\.)*)"\s*$'
+)
+
+# order matters: most specific first
+_SCRUBBERS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I), "<uuid>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"), "<ip>"),
+    (re.compile(r"\b[0-9a-f]{16,}\b", re.I), "<hex>"),
+    (re.compile(r"\b\d+(?:\.\d+)?(?:ms|us|kb|mb|gb)\b", re.I), "<dur>"),
+    (re.compile(r"\b[a-z0-9]+://[\w./:-]+"), "<uri>"),
+    (re.compile(r"(?<![\w<])/[\w./-]{2,}"), "<path>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\b"), "<num>"),
+    (re.compile(r"\s+"), " "),
+]
+
+
+def signature(msg: str) -> str:
+    """Collapse a message to a stable error signature. This is what makes top-N meaningful."""
+    s = msg.lower()
+    for pat, repl in _SCRUBBERS:
+        s = pat.sub(repl, s)
+    return s.strip()
+
+
+def parse(lines: Iterable[str]) -> Iterator[dict]:
+    for raw in lines:
+        m = LINE_RE.match(raw.rstrip("\n"))
+        if m is None:
+            yield {"level": "UNPARSED", "raw": raw.rstrip("\n")}
+            continue
+        d = m.groupdict()
+        ts = datetime.fromisoformat(d["ts"].replace("Z", "+00:00"))  # 3.11 handles the offset
+        yield {"ts": ts, "epoch": ts.timestamp(), "level": d["level"], "service": d["service"],
+               "trace": d["trace"], "msg": d["msg"], "sig": signature(d["msg"])}
+
+
+def window_start(epoch: float, width_s: int) -> int:
+    return int(epoch // width_s) * width_s
+
+
+def top_errors_by_window(lines: Iterable[str], width_s: int = 300, n: int = 3,
+                         levels: tuple[str, ...] = ("ERROR", "FATAL")
+                         ) -> tuple[dict[int, list[tuple[str, int]]], Counter]:
+    per_window: dict[int, Counter] = defaultdict(Counter)
+    meta: Counter = Counter()
+    for rec in parse(lines):
+        meta[rec["level"]] += 1
+        if rec["level"] not in levels:
+            continue
+        per_window[window_start(rec["epoch"], width_s)][(rec["service"], rec["sig"])] += 1
+    out = {w: [(f"{svc}: {sig}", c) for (svc, sig), c in ctr.most_common(n)]
+           for w, ctr in sorted(per_window.items())}
+    return out, meta
+
+
+class SpaceSaving:
+    """Bounded top-K over an unbounded stream. k counters, O(k) memory.
+
+    Guarantee: count[x] - err[x] <= true(x) <= count[x], and every item with true frequency
+    above n/k is retained. Exactly what 'which signature is dominating' needs.
+    """
+
+    def __init__(self, k: int) -> None:
+        self.k = k
+        self.count: dict[str, int] = {}
+        self.err: dict[str, int] = {}
+        self.n = 0
+
+    def add(self, item: str, w: int = 1) -> None:
+        self.n += w
+        if item in self.count:
+            self.count[item] += w
+        elif len(self.count) < self.k:
+            self.count[item] = w
+            self.err[item] = 0
+        else:
+            victim = min(self.count, key=self.count.__getitem__)  # O(k); a min-heap makes it O(log k)
+            c = self.count.pop(victim)
+            self.err.pop(victim, None)
+            self.count[item] = c + w      # inherit the evicted count -> never under-counts...
+            self.err[item] = c            # ...at the price of over-counting by at most c
+
+    def top(self, n: int) -> list[tuple[str, int, int]]:
+        items = sorted(self.count.items(), key=lambda kv: -kv[1])[:n]
+        return [(k, c, self.err.get(k, 0)) for k, c in items]
+
+
+# ---------------------------------------------------------------- demo + tests
+LOGS = """\
+2026-09-02T10:01:02Z level=INFO service=scoring trace=aa01 msg="scored applicant 88213 in 41ms"
+2026-09-02T10:01:03Z level=ERROR service=scoring trace=aa02 msg="feature-store timeout for user 8412 after 250ms"
+2026-09-02T10:02:11Z level=ERROR service=scoring trace=aa03 msg="feature-store timeout for user 9931 after 250ms"
+2026-09-02T10:03:44Z level=ERROR service=scoring trace=aa04 msg="feature-store timeout for user 1004 after 500ms"
+2026-09-02T10:04:00Z level=ERROR service=ingest trace=aa05 msg="sms parse failed id=3f2b0f9c-2f4a-4a0e-9e1e-0b2c4d5e6f70"
+2026-09-02T10:04:30Z level=WARN service=scoring trace=aa06 msg="fallback score used"
+2026-09-02T10:06:01Z level=ERROR service=scoring trace=aa07 msg="feature-store timeout for user 77 after 250ms"
+2026-09-02T10:06:02Z level=FATAL service=scoring trace=aa08 msg="model artifact s3://models/loan_v3/model.tar.gz not found"
+2026-09-02T10:07:20Z level=ERROR service=ingest trace=aa09 msg="sms parse failed id=99aa1c2d-1111-4444-8888-0b2c4d5e6f70"
+2026-09-02T10:08:20Z level=ERROR service=ingest trace=aa10 msg="sms parse failed id=1c2d3e4f-2222-4444-8888-0b2c4d5e6f70"
+this line is not in our format at all
+""".splitlines()
+
+
+def test_signature_collapses_variables() -> None:
+    a = signature("feature-store timeout for user 8412 after 250ms")
+    b = signature("feature-store timeout for user 9931 after 250ms")
+    c = signature("feature-store timeout for user 1004 after 500ms")
+    assert a == b == c == "feature-store timeout for user <num> after <dur>", a
+    assert signature("sms parse failed id=3f2b0f9c-2f4a-4a0e-9e1e-0b2c4d5e6f70") \
+        == "sms parse failed id=<uuid>"
+
+
+def test_windowing_and_topn() -> None:
+    windows, meta = top_errors_by_window(LOGS, width_s=300, n=2)
+    assert meta["UNPARSED"] == 1 and meta["INFO"] == 1 and meta["WARN"] == 1
+    keys = sorted(windows)
+    assert len(keys) == 2                       # 10:00-10:05 and 10:05-10:10
+    first = dict(windows[keys[0]])
+    assert first["scoring: feature-store timeout for user <num> after <dur>"] == 3
+    second = dict(windows[keys[1]])
+    assert second["ingest: sms parse failed id=<uuid>"] == 2
+    for w in keys:
+        print(f"  window {datetime.fromtimestamp(w, timezone.utc):%H:%M} -> {windows[w]}")
+
+
+def test_space_saving_finds_heavy_hitters() -> None:
+    import random as _r
+    rng = _r.Random(11)
+    stream = ["timeout"] * 5000 + ["parse_fail"] * 2000 + [f"noise_{i}" for i in range(3000)]
+    rng.shuffle(stream)
+    exact = Counter(stream)
+    ss = SpaceSaving(k=64)                       # 64 counters for 3002 distinct keys
+    for item in stream:
+        ss.add(item)
+    top = ss.top(2)
+    assert [t[0] for t in top] == ["timeout", "parse_fail"]      # ranking preserved
+    for name, cnt, err in top:
+        assert cnt - err <= exact[name] <= cnt   # the guarantee holds
+        assert abs(cnt - exact[name]) / exact[name] < 0.05
+    print(f"  space-saving k=64 over {len(stream)} events, {len(exact)} distinct -> {top}")
+
+
+for t in (test_signature_collapses_variables, test_windowing_and_topn,
+          test_space_saving_finds_heavy_hitters):
+    t()
+print("6.6 log top-N: all tests passed")
+```
+
+#### Complexity
+Exact version: `O(L)` time for L lines (the regex is linear — no nested quantifiers, so no
+catastrophic backtracking) and `O(W x S)` space for W windows by S distinct signatures; top-N per
+window is `O(S log n)`. Space-Saving: `O(k)` space, `O(k)` per update as written (`min` over the
+dict) or `O(log k)` with a min-heap, `O(k log k)` to report.
+
+#### Follow-ups
+- **"Bound the memory."** Cap *windows* too, not just signatures: hold the last W windows in a
+  `deque` and emit each one when the watermark passes it (see 6.15).
+- **"Regex safety."** Never build a signature regex with nested quantifiers over untrusted input —
+  ReDoS is a real outage. Compile once at module level, and cap line length before matching.
+- **"Multi-line stack traces?"** Fold continuation lines (those failing the start-of-record regex)
+  into the previous record and signature on *exception type + top 3 frames*, not the message.
+- **"Count-Min instead?"** CMS when you need per-key frequency for arbitrary keys ("how hot is this
+  tenant"); Space-Saving when you need the top-K list itself.
+
+#### Anchor to my experience
+> **Say it like this:** "Signature normalisation is the same instinct behind the knowledge-graph work
+> at TrueBalance. We had a regex SMS parser that was brittle precisely because it keyed on surface
+> text; I replaced it with a schema of 7 entity types, 29 predicates and 85+ canonical field
+> mappings, so variants collapse onto one canonical entity instead of a hundred near-duplicate
+> patterns — 100% field coverage on 100K production SMS, 169,879 of 169,879 fields. Log signatures
+> are the same problem at smaller scale: normalise to the invariant, then count."
+
+---
+
+### 6.7 Paginated API client as a generator
+
+#### Statement
+Write a client that walks a cursor-paginated REST endpoint and **yields items**, with retry, rate
+limiting, a hard page cap, and an injectable transport so the tests run offline.
+
+#### Clarifying questions
+- Cursor-based or offset-based? (Cursor is stable under concurrent writes; offset silently skips and
+  duplicates rows when the data changes mid-walk — worth saying out loud.)
+- Is the cursor guaranteed to terminate, or should I defend against a server that loops?
+- Does the API return `Retry-After` on 429, and should I honour it over my own backoff?
+- Do callers want items or pages? (Yield items; expose pages as a second generator.)
+
+#### Approach
+A generator, so the caller can `break` early and the client simply stops fetching — that alone saves
+most of the API budget in practice. The transport is a plain callable `fetch(cursor) -> dict`, which
+means the test needs no HTTP, no mocking library and no network. Three defences make it senior: a
+**hard page cap** (a runaway loop against a paid API is a real incident), **cursor-cycle detection**
+(a seen-set, because a buggy server can hand back a cursor it already gave you), and **rate limit
+before the call, retry around the call**.
+
+```python
+"""Cursor-paginated API client: generator + retry + rate limit + page cap + cycle detection."""
+from __future__ import annotations
+
+import random
+import time
+from typing import Any, Callable, Iterator
+
+
+class TransientError(Exception): ...
+class PermanentError(Exception): ...
+class PageCapExceeded(RuntimeError): ...
+class CursorCycle(RuntimeError): ...
+
+
+class Bucket:
+    """Minimal token bucket (see 6.2) so this block stands alone."""
+
+    def __init__(self, rate: float, capacity: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.rate, self.capacity, self._clock = rate, capacity, clock
+        self._tokens, self._stamp = float(capacity), clock()
+
+    def take(self, sleep: Callable[[float], None]) -> float:
+        now = self._clock()
+        self._tokens = min(self.capacity, self._tokens + (now - self._stamp) * self.rate)
+        self._stamp = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return 0.0
+        waited = (1.0 - self._tokens) / self.rate
+        sleep(waited)
+        self._tokens = 0.0
+        self._stamp = self._clock()
+        return waited
+
+
+def _call_with_retry(fn: Callable[[], Any], *, attempts: int, base: float, cap: float,
+                     sleep: Callable[[float], None], rng: random.Random) -> Any:
+    last: BaseException | None = None
+    for n in range(1, attempts + 1):
+        try:
+            return fn()
+        except PermanentError:
+            raise                                    # 4xx: never retry
+        except TransientError as exc:
+            last = exc
+            if n == attempts:
+                break
+            sleep(rng.uniform(0.0, min(cap, base * 2 ** (n - 1))))
+    raise TransientError(f"exhausted {attempts} attempts: {last!r}") from last
+
+
+def paginate(fetch: Callable[[str | None], dict], *,
+             start_cursor: str | None = None,
+             max_pages: int = 100,
+             attempts: int = 3,
+             base: float = 0.2,
+             cap: float = 5.0,
+             bucket: Bucket | None = None,
+             sleep: Callable[[float], None] = time.sleep,
+             rng: random.Random | None = None,
+             items_key: str = "items",
+             cursor_key: str = "next_cursor") -> Iterator[dict]:
+    """Yield every item across pages. fetch(cursor) -> {items: [...], next_cursor: str|None}."""
+    _rng = rng or random.Random()
+    cursor = start_cursor
+    seen: set[str] = set()
+    for page_no in range(1, max_pages + 1):
+        if bucket is not None:
+            bucket.take(sleep)
+        payload = _call_with_retry(lambda c=cursor: fetch(c), attempts=attempts, base=base,
+                                   cap=cap, sleep=sleep, rng=_rng)
+        yield from (payload.get(items_key) or [])
+        nxt = payload.get(cursor_key)
+        if not nxt:
+            return                                   # normal termination
+        if nxt in seen:
+            raise CursorCycle(f"server returned cursor {nxt!r} twice at page {page_no}")
+        seen.add(nxt)
+        cursor = nxt
+    raise PageCapExceeded(f"stopped after {max_pages} pages; widen the cap deliberately "
+                          f"(last cursor={cursor!r})")
+
+
+def paginate_pages(fetch: Callable[[str | None], dict], *, max_pages: int = 100,
+                   items_key: str = "items", cursor_key: str = "next_cursor"
+                   ) -> Iterator[list[dict]]:
+    """Page-at-a-time variant -- what you want when the sink is itself batched."""
+    cursor: str | None = None
+    for _ in range(max_pages):
+        payload = fetch(cursor)
+        yield payload.get(items_key) or []
+        cursor = payload.get(cursor_key)
+        if not cursor:
+            return
+    raise PageCapExceeded("page cap hit")
+
+
+# ---------------------------------------------------------------- fake transport + tests
+class FakeAPI:
+    """Deterministic offline transport: pages of `size`, with scripted transient failures."""
+
+    def __init__(self, total: int, size: int, fail_plan: dict[int, int] | None = None) -> None:
+        self.rows = [{"id": i, "name": f"row-{i}"} for i in range(total)]
+        self.size = size
+        self.fail_plan = dict(fail_plan or {})   # logical page number -> how many times to fail
+        self.calls = 0
+        self.pages_served = 0
+
+    def __call__(self, cursor: str | None) -> dict:
+        self.calls += 1
+        start = 0 if cursor is None else int(cursor)
+        page_no = start // self.size + 1
+        left = self.fail_plan.get(page_no, 0)
+        if left:
+            self.fail_plan[page_no] = left - 1
+            raise TransientError(f"503 upstream on page {page_no}")
+        self.pages_served += 1
+        chunk = self.rows[start:start + self.size]
+        nxt = start + self.size
+        return {"items": chunk, "next_cursor": str(nxt) if nxt < len(self.rows) else None}
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.slept.append(s)
+        self.t += s
+
+
+def test_walks_every_page_exactly_once() -> None:
+    api = FakeAPI(total=25, size=10)
+    got = list(paginate(api, sleep=lambda _s: None, rng=random.Random(0)))
+    assert [r["id"] for r in got] == list(range(25))
+    assert api.pages_served == 3
+
+
+def test_retries_a_transient_page() -> None:
+    clk = FakeClock()
+    api = FakeAPI(total=20, size=10, fail_plan={2: 2})       # page 2 fails twice then succeeds
+    got = list(paginate(api, attempts=3, base=0.1, sleep=clk.sleep, rng=random.Random(5)))
+    assert len(got) == 20 and api.pages_served == 2
+    assert len(clk.slept) == 2 and all(s <= 0.2 for s in clk.slept)
+
+
+def test_lazy_stops_fetching_on_break() -> None:
+    api = FakeAPI(total=1000, size=10)
+    first_five = []
+    for row in paginate(api):
+        first_five.append(row)
+        if len(first_five) == 5:
+            break
+    assert api.pages_served == 1              # generator laziness = 99 pages never fetched
+
+
+def test_page_cap_and_cycle_guard() -> None:
+    api = FakeAPI(total=1000, size=10)
+    try:
+        list(paginate(api, max_pages=3))
+        raise AssertionError("expected cap")
+    except PageCapExceeded:
+        pass
+
+    def looping(_cursor: str | None) -> dict:               # server stuck on one cursor
+        return {"items": [{"id": 1}], "next_cursor": "same"}
+
+    try:
+        list(paginate(looping, max_pages=50))
+        raise AssertionError("expected cycle detection")
+    except CursorCycle:
+        pass
+
+
+def test_permanent_error_is_not_retried() -> None:
+    def four_oh_four(_cursor: str | None) -> dict:
+        raise PermanentError("404 not found")
+
+    try:
+        list(paginate(four_oh_four, attempts=5))
+        raise AssertionError("expected PermanentError")
+    except PermanentError:
+        pass
+
+
+def test_rate_limited_walk() -> None:
+    clk = FakeClock()
+    api = FakeAPI(total=50, size=10)
+    b = Bucket(rate=2.0, capacity=1.0, clock=clk)            # 2 req/s, no burst
+    got = list(paginate(api, bucket=b, sleep=clk.sleep, rng=random.Random(1)))
+    assert len(got) == 50 and api.pages_served == 5
+    assert abs(clk.t - 2.0) < 1e-6                          # 4 waits of 0.5s after the free first
+    print(f"  5 pages under a 2/s limit took {clk.t:.2f}s of (fake) wall clock")
+
+
+for t in (test_walks_every_page_exactly_once, test_retries_a_transient_page,
+          test_lazy_stops_fetching_on_break, test_page_cap_and_cycle_guard,
+          test_permanent_error_is_not_retried, test_rate_limited_walk):
+    t()
+print("6.7 paginated client: all tests passed")
+```
+
+#### Complexity
+`O(pages)` requests and `O(page_size)` memory — the generator never accumulates the full result set,
+which is the whole point when the endpoint has 4 million rows. Wall time is `pages / rate` once the
+limiter binds; retries add expected `0.5 * base * (2^k - 1)` per failing page.
+
+#### Follow-ups
+- **"Parallelise it."** You cannot parallelise a *cursor* walk — page N+1's cursor comes from page N.
+  Parallelise across independent partitions instead (per date, per tenant, per id range), or switch
+  to a keyset predicate (`WHERE id > last_id ORDER BY id LIMIT n`) and split the id space.
+- **"Resumability."** Checkpoint the cursor to durable storage each page. A six-hour backfill that
+  dies at hour five and restarts from zero is a bad afternoon.
+- **"Offset pagination is worse."** Under concurrent inserts `OFFSET 2000 LIMIT 100` both skips and
+  duplicates rows, and `OFFSET` degrades linearly. If forced onto offsets, at least detect drift with
+  a stable ordering key.
+- **"429 with `Retry-After`."** Honour the header over your own exponent — the server knows better —
+  but cap it: a `Retry-After: 3600` should trip a circuit breaker, not sleep for an hour.
+
+---
+
+### 6.8 Concurrent fetch with bounded parallelism — three ways
+
+#### Statement
+Fetch 200 URLs with at most 8 in flight, a per-request timeout, and **collect partial failures**
+rather than aborting. Show the thread-pool version and the asyncio versions, and say which you'd pick.
+
+#### Clarifying questions
+- Is the work **I/O-bound** (threads or asyncio) or CPU-bound (processes — the GIL means threads buy
+  you nothing)?
+- Must results stay in input order, or is completion order fine?
+- Is one failure fatal, or do we want best-effort plus a failure report? (In MLOps: almost always
+  best-effort. A batch scoring job that dies because 1 of 5,000 feature lookups 404'd is a bad job.)
+- Is there an existing event loop (FastAPI) I have to live inside?
+
+#### Approach
+Three idioms, one shared contract: `(results, errors)`.
+
+1. **`ThreadPoolExecutor` + `as_completed`** — the default when the work is blocking calls in
+   libraries you do not control (`requests`, `boto3`, a DB driver). `max_workers` *is* the bound.
+   Key gotcha: `future.result(timeout=...)` times out **your wait**, not the task — the thread runs
+   on, still holding its connection. Real timeouts belong in the client
+   (`requests.get(..., timeout=)`, botocore config), never in the future.
+2. **`asyncio.gather` + `Semaphore`** — the loop is unbounded by nature, so the semaphore is what
+   creates the bound. `return_exceptions=True` converts partial failures into values instead of the
+   first exception, and results stay in input order.
+3. **`asyncio.TaskGroup`** (3.11) — structured concurrency: no task outlives the block, and the first
+   escaping exception **cancels its siblings**. That is a feature (fail fast) and a trap (you wanted
+   best-effort). For best-effort inside a TaskGroup, catch inside each task so nothing escapes.
+
+```python
+"""Bounded-parallel fetch: threads, asyncio+Semaphore, TaskGroup. Partial failures collected."""
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures as cf
+import time
+from typing import Any
+
+
+# ---------------------------------------------------------------- fake I/O
+def blocking_fetch(url: str, *, delay: float = 0.02) -> dict[str, Any]:
+    """Stand-in for requests.get(url, timeout=...). Deterministic behaviour keyed off the url."""
+    time.sleep(delay if "slow" not in url else delay * 20)
+    if "boom" in url:
+        raise ConnectionError(f"connection reset: {url}")
+    return {"url": url, "bytes": len(url) * 100}
+
+
+async def async_fetch(url: str, *, delay: float = 0.02) -> dict[str, Any]:
+    await asyncio.sleep(delay if "slow" not in url else delay * 20)
+    if "boom" in url:
+        raise ConnectionError(f"connection reset: {url}")
+    return {"url": url, "bytes": len(url) * 100}
+
+
+URLS = ([f"https://api/ok/{i}" for i in range(20)]
+        + ["https://api/boom/1", "https://api/boom/2", "https://api/slow/1"])
+
+
+# ---------------------------------------------------------------- 1: threads
+def fetch_threads(urls: list[str], max_workers: int = 8, overall_timeout: float = 5.0
+                  ) -> tuple[dict[str, Any], dict[str, str]]:
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with cf.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="fetch") as ex:
+        futs = {ex.submit(blocking_fetch, u): u for u in urls}
+        try:
+            for fut in cf.as_completed(futs, timeout=overall_timeout):
+                url = futs[fut]
+                try:
+                    results[url] = fut.result()
+                except Exception as exc:                    # collect, do not abort the batch
+                    errors[url] = f"{type(exc).__name__}: {exc}"
+        except TimeoutError:
+            for fut, url in futs.items():
+                if not fut.done():
+                    fut.cancel()          # cancels only tasks that have NOT started running
+                    errors.setdefault(url, "TimeoutError: overall deadline")
+    return results, errors
+
+
+# ---------------------------------------------------------------- 2: gather + semaphore
+async def fetch_gather(urls: list[str], limit: int = 8, per_task_timeout: float = 0.2
+                       ) -> tuple[dict[str, Any], dict[str, str]]:
+    sem = asyncio.Semaphore(limit)
+    inflight = {"now": 0, "peak": 0}
+
+    async def one(url: str) -> Any:
+        async with sem:                                      # THIS is the concurrency bound
+            inflight["now"] += 1
+            inflight["peak"] = max(inflight["peak"], inflight["now"])
+            try:
+                async with asyncio.timeout(per_task_timeout):   # 3.11: real cancellation
+                    return await async_fetch(url)
+            finally:
+                inflight["now"] -= 1
+
+    settled = await asyncio.gather(*(one(u) for u in urls), return_exceptions=True)
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for url, out in zip(urls, settled):                      # input order preserved
+        if isinstance(out, BaseException):
+            errors[url] = f"{type(out).__name__}: {out}"
+        else:
+            results[url] = out
+    assert inflight["peak"] <= limit
+    return results, errors
+
+
+# ---------------------------------------------------------------- 3: TaskGroup
+async def fetch_taskgroup(urls: list[str], limit: int = 8, per_task_timeout: float = 0.2
+                          ) -> tuple[dict[str, Any], dict[str, str]]:
+    """Structured concurrency, best-effort: exceptions are caught INSIDE each task, because a
+    TaskGroup cancels every sibling as soon as one exception escapes."""
+    sem = asyncio.Semaphore(limit)
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+
+    async def one(url: str) -> None:
+        async with sem:
+            try:
+                async with asyncio.timeout(per_task_timeout):
+                    results[url] = await async_fetch(url)
+            except Exception as exc:
+                errors[url] = f"{type(exc).__name__}: {exc}"
+
+    async with asyncio.TaskGroup() as tg:                    # every task is joined at the exit
+        for u in urls:
+            tg.create_task(one(u))
+    return results, errors
+
+
+async def fetch_taskgroup_fail_fast(urls: list[str]) -> None:
+    """Contrast: let exceptions escape -> siblings cancelled, ExceptionGroup raised."""
+    async with asyncio.TaskGroup() as tg:
+        for u in urls:
+            tg.create_task(async_fetch(u))
+
+
+# ---------------------------------------------------------------- tests
+def test_threads() -> None:
+    t0 = time.monotonic()
+    res, err = fetch_threads(URLS, max_workers=8)
+    dt = time.monotonic() - t0
+    # 21 successes: the SLOW url succeeds here, because a thread pool has no way to time out
+    # an already-running task. Compare with the asyncio versions below, which cancel it.
+    assert len(res) == 21 and len(err) == 2
+    assert all("boom" in u for u in err)
+    assert "https://api/slow/1" in res              # <- the thread-pool timeout gap, in one line
+    assert dt < 2.0                                # 23 sleeping tasks over 8 workers
+    print(f"  threads: {len(res)} ok / {len(err)} failed in {dt:.3f}s "
+          f"(note: the slow url completed -- threads cannot be cancelled)")
+
+
+def test_gather() -> None:
+    res, err = asyncio.run(fetch_gather(URLS, limit=8, per_task_timeout=0.2))
+    assert len(res) == 20
+    assert set(err) == {"https://api/boom/1", "https://api/boom/2", "https://api/slow/1"}
+    assert "TimeoutError" in err["https://api/slow/1"]        # the timeout really cancelled it
+    print(f"  gather: {len(res)} ok / {len(err)} failed; slow -> {err['https://api/slow/1']}")
+
+
+def test_taskgroup_best_effort() -> None:
+    res, err = asyncio.run(fetch_taskgroup(URLS, limit=8, per_task_timeout=0.2))
+    assert len(res) == 20 and len(err) == 3
+    print(f"  taskgroup(best-effort): {len(res)} ok / {len(err)} failed")
+
+
+def test_taskgroup_fail_fast_raises_group() -> None:
+    try:
+        asyncio.run(fetch_taskgroup_fail_fast(URLS))
+        raise AssertionError("expected an ExceptionGroup")
+    except* ConnectionError as eg:                            # 3.11 except* syntax
+        print(f"  taskgroup(fail-fast): ExceptionGroup with "
+              f"{len(eg.exceptions)} ConnectionError(s)")
+
+
+for t in (test_threads, test_gather, test_taskgroup_best_effort,
+          test_taskgroup_fail_fast_raises_group):
+    t()
+print("6.8 bounded concurrency: all tests passed")
+```
+
+#### Complexity
+All three: `O(n)` tasks; wall time is roughly `ceil(n / limit) x latency` for uniform tasks, though
+in practice the slowest task in the final wave dominates — hence per-task timeouts. Memory is `O(n)`
+for the collected results plus `O(limit)` in flight. A thread reserves ~8 MB of stack address space,
+so `max_workers=500` is a real resource decision; an asyncio task is a few KB, which is why 10k
+concurrent sockets is an asyncio job, not a thread job.
+
+#### Which to pick
+
+| Situation | Pick |
+|---|---|
+| Blocking SDK you cannot change (`boto3`, DB driver) | `ThreadPoolExecutor` |
+| Thousands of concurrent sockets, async client available | asyncio + `Semaphore` |
+| Inside an existing async service (FastAPI) | asyncio; never block the loop |
+| CPU-bound (feature hashing, tokenising, image decode) | `ProcessPoolExecutor` — the GIL makes threads useless |
+| "All or nothing": cancel the rest on first failure | `TaskGroup`, let it propagate |
+| Best-effort with a failure report | `gather(return_exceptions=True)` or catch inside the TaskGroup |
+
+#### Follow-ups
+- **"Why doesn't `future.result(timeout=1)` kill the task?"** Python cannot preempt a thread. It
+  abandons *your wait*; the worker runs to completion. `Executor.shutdown(cancel_futures=True)`
+  (3.9+) drops queued-but-unstarted work and nothing more.
+- **"Retries plus bounded concurrency?"** Compose them: the retry from 6.1 goes *inside* the worker
+  so a retry consumes the same slot. Retrying outside the semaphore quietly doubles concurrency
+  exactly when the dependency is already failing.
+- **"Ordered results from `as_completed`?"** Keep an index in the future map and sort at the end, or
+  use `Executor.map` — which yields in input order but therefore stalls on the first exception.
+- **"Free-threaded Python?"** 3.13's no-GIL build changes the CPU-bound calculus. On a 3.11 stack the
+  rule stands: threads for I/O, processes for CPU.
+
+#### Anchor to my experience
+> **Say it like this:** "On the scoring path I care about the opposite end of this dial. The Lambda
+> consumers scale out on SQS depth, so the platform hands me parallelism for free and my job is to
+> *bound* it so I don't melt the downstream — the same semaphore idea, expressed as reserved
+> concurrency plus a limiter. And for the internal Claude assistant I built on MCP over Jira, GitHub,
+> Jenkins, AWS and Grafana, the fan-out to five backends per request is exactly this pattern:
+> bounded parallel calls, per-call timeout, and partial results rendered rather than one dead tool
+> taking down the whole answer."
+
+---
+### 6.9 Producer/consumer pipeline with backpressure
+
+#### Statement
+Build a pipeline: one producer reads records, N worker threads transform them, results land in a
+sink. Bound the memory, shut down cleanly, and do not lose or double-process anything.
+
+#### Clarifying questions
+- Is the source infinite (a queue consumer) or finite (a file)? That decides whether "done" exists.
+- What must happen on a worker exception — kill the pipeline, or quarantine the record and continue?
+- Must output order match input order?
+- Is the work I/O-bound (threads are right) or CPU-bound (this design needs processes)?
+
+#### Approach
+`queue.Queue(maxsize=k)` is the whole design. `maxsize` **is** the backpressure: when workers fall
+behind, the producer's `put()` blocks, which propagates the slowdown up to the source instead of
+building an unbounded in-memory buffer. An unbounded queue is not "faster", it is an OOM with extra
+steps — the classic symptom is a container that gets OOMKilled twenty minutes into a backfill.
+
+Shutdown is by **sentinel**: push exactly N sentinels, one per worker, after the last item. Each
+worker exits on seeing one. This drains cleanly — every real item queued before the sentinels is
+processed, because a FIFO queue guarantees the ordering. Daemon threads plus `sys.exit` would *not*
+drain, and that is how you lose the last 8 records of every run.
+
+Errors go to a separate quarantine queue, so one poison record cannot kill the batch, and the count
+is reported. Silent `except: pass` in a worker is the single most expensive bug pattern in data
+pipelines.
+
+```python
+"""Bounded producer/consumer pipeline: N threads, sentinel shutdown, backpressure, quarantine."""
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable
+
+_SENTINEL = object()
+
+
+@dataclass
+class PipelineResult:
+    processed: int = 0
+    failed: int = 0
+    results: list[Any] = field(default_factory=list)
+    quarantine: list[tuple[Any, str]] = field(default_factory=list)
+    producer_blocked_s: float = 0.0
+    per_worker: dict[int, int] = field(default_factory=dict)
+    wall_s: float = 0.0
+
+
+def run_pipeline(items: Iterable[Any],
+                 work: Callable[[Any], Any],
+                 n_workers: int = 4,
+                 maxsize: int = 8,
+                 stop: threading.Event | None = None) -> PipelineResult:
+    """Feed `items` through `work` on n_workers threads. maxsize bounds memory AND applies
+    backpressure to the producer. Exceptions quarantine the record; they never kill the run."""
+    q: queue.Queue = queue.Queue(maxsize=maxsize)
+    out_q: queue.Queue = queue.Queue()
+    bad_q: queue.Queue = queue.Queue()
+    stop = stop or threading.Event()
+    counts: dict[int, int] = {}
+    lock = threading.Lock()
+    t0 = time.monotonic()
+
+    def worker(wid: int) -> None:
+        local = 0
+        while True:
+            item = q.get()
+            try:
+                if item is _SENTINEL:
+                    return
+                if stop.is_set():
+                    continue              # keep draining so the producer never deadlocks
+                out_q.put(work(item))
+                local += 1
+            except Exception as exc:      # quarantine, never swallow silently
+                bad_q.put((item, f"{type(exc).__name__}: {exc}"))
+            finally:
+                q.task_done()
+                if item is _SENTINEL:
+                    with lock:
+                        counts[wid] = local
+
+    threads = [threading.Thread(target=worker, args=(i,), name=f"w{i}", daemon=False)
+               for i in range(n_workers)]
+    for t in threads:
+        t.start()
+
+    blocked = 0.0
+    try:
+        for item in items:
+            if stop.is_set():
+                break
+            b0 = time.monotonic()
+            q.put(item)                   # BLOCKS when full -> backpressure reaches the source
+            blocked += time.monotonic() - b0
+    finally:
+        for _ in threads:                 # exactly one sentinel per worker
+            q.put(_SENTINEL)
+        for t in threads:
+            t.join()
+
+    res = PipelineResult(producer_blocked_s=blocked, per_worker=counts,
+                         wall_s=time.monotonic() - t0)
+    while not out_q.empty():
+        res.results.append(out_q.get())
+    while not bad_q.empty():
+        res.quarantine.append(bad_q.get())
+    res.processed = len(res.results)
+    res.failed = len(res.quarantine)
+    return res
+
+
+# ---------------------------------------------------------------- tests
+def test_all_items_processed_and_workers_shut_down() -> None:
+    before = threading.active_count()
+    r = run_pipeline(range(200), lambda x: x * x, n_workers=4, maxsize=8)
+    assert r.processed == 200 and r.failed == 0
+    assert sorted(r.results) == sorted(x * x for x in range(200))
+    assert sum(r.per_worker.values()) == 200
+    assert threading.active_count() == before          # no leaked threads
+    print(f"  200 items / 4 workers: per-worker={sorted(r.per_worker.values())}")
+
+
+def test_poison_record_is_quarantined_not_fatal() -> None:
+    def work(x: int) -> int:
+        if x == 13:
+            raise ValueError("unparseable record")
+        return x + 1
+
+    r = run_pipeline(range(20), work, n_workers=3, maxsize=4)
+    assert r.processed == 19 and r.failed == 1
+    assert r.quarantine[0][0] == 13 and "ValueError" in r.quarantine[0][1]
+
+
+def test_backpressure_actually_blocks_the_producer() -> None:
+    r = run_pipeline(range(40), lambda x: (time.sleep(0.005), x)[1], n_workers=2, maxsize=4)
+    assert r.processed == 40
+    # 40 items x 5ms over 2 workers = ~100ms of work; a queue of 4 cannot absorb that,
+    # so the producer must have been forced to wait.
+    assert r.producer_blocked_s > 0.02, r.producer_blocked_s
+    print(f"  producer blocked {r.producer_blocked_s*1000:.0f} ms "
+          f"(wall {r.wall_s*1000:.0f} ms) -> backpressure is real")
+
+
+def test_graceful_early_stop() -> None:
+    stop = threading.Event()
+    seen: list[int] = []
+    lock = threading.Lock()
+
+    def work(x: int) -> int:
+        with lock:
+            seen.append(x)
+            if len(seen) == 10:
+                stop.set()                 # someone hit Ctrl-C / SIGTERM
+        return x
+
+    r = run_pipeline(range(10_000), work, n_workers=2, maxsize=4, stop=stop)
+    assert r.processed < 10_000            # stopped early
+    assert r.processed >= 10               # and drained what was already in flight
+    print(f"  early stop after {r.processed} items (of 10,000), clean join")
+
+
+for t in (test_all_items_processed_and_workers_shut_down,
+          test_poison_record_is_quarantined_not_fatal,
+          test_backpressure_actually_blocks_the_producer,
+          test_graceful_early_stop):
+    t()
+print("6.9 producer/consumer: all tests passed")
+```
+
+#### Complexity
+Time is `O(n / n_workers x work_cost)` for I/O-bound work; for CPU-bound work under the GIL it is
+`O(n x work_cost)` no matter how many threads you start — threads only help when the work releases
+the GIL. Memory is the point: `O(maxsize + n_workers)` in flight, **not** `O(n)`. Note that
+`res.results` in this version *is* `O(n)`; in a real pipeline the sink is a file or a database
+writer, and you never materialise the list.
+
+#### Follow-ups
+- **"What changes with multiprocessing?"** Four things. (1) Items and results must be
+  **picklable** — a database handle or a lambda is not. (2) Every item is *copied* across the process
+  boundary, so IPC serialisation can dwarf the work; batch the items or use shared memory
+  (`multiprocessing.shared_memory`) for large arrays. (3) Start method: **spawn** is the default on
+  Windows and macOS, so the module is re-imported in each child and all top-level code must be under
+  `if __name__ == "__main__":`. (4) Sentinel shutdown still works, but a killed child can lose an
+  in-flight item — `multiprocessing.Queue` is not transactional, so at-least-once needs an ack in a
+  durable store (see 6.13). In practice I reach for `concurrent.futures.ProcessPoolExecutor` unless I
+  need streaming semantics.
+- **"Ordering?"** Tag each item with a sequence number and reorder at the sink with a small heap, or
+  shard by key so each key goes to a fixed worker (`hash(key) % n_workers`), which preserves per-key
+  order — usually what actually matters.
+- **"Multi-stage pipeline?"** Chain queues (`source -> Q1 -> parse -> Q2 -> score -> sink`); each
+  queue's `maxsize` is an independent backpressure valve, and the queue depths are your best
+  bottleneck metric. Export them.
+- **"Retries?"** Requeue with an attempt counter and a max, then dead-letter. Requeuing without a
+  cap turns one poison record into an infinite hot loop.
+
+---
+
+### 6.10 Train/serve feature-parity checker
+
+> This is the single most valuable problem in this bank for you, because you have actually lived
+> the incident. Do not merely solve it — narrate it.
+
+#### Statement
+Given the offline feature vector used at training time and the online feature vector produced by the
+serving path for the *same entity*, report every discrepancy: features missing online, features
+present online but never trained on, type mismatches, values outside tolerance, and features that
+look like a silent default fill. Then summarise across a sample of entities and gate a release on it.
+
+#### Clarifying questions
+- Do we have a **feature schema/contract** (name, dtype, default), or must I infer it from the
+  offline vector? (Having a contract is the difference between a checker and a guess.)
+- What tolerance? Float32 serving versus float64 training legitimately differs at ~1e-7, so exact
+  equality will fire on everything and get muted within a day.
+- Is there a value the serving layer substitutes on a feature-store miss (usually `0.0` or `-1`)?
+  **This is the important question** — that fill turns a hard failure into a silent wrong answer.
+- Is null semantically distinct from zero for this model? (For a gradient-boosted tree: absolutely.)
+
+#### Approach
+Compare per-entity against a **schema**, classify every discrepancy into a *kind*, and fold the
+results into a bounded accumulator with capped examples — the checker must not OOM on the very
+incident it is diagnosing, which is a real risk when 3,973 features are missing on every one of
+100,000 entities.
+
+The `suspect_default` kind is the one that earns its keep. Missing keys are loud. A feature store
+that returns `0.0` for a key it does not have is **silent**: the vector has the right shape, the
+model returns a number, monitoring is green, and the score distribution quietly collapses.
+
+```python
+"""Train/serve feature-parity checker. Bounded memory, schema-driven, gate-able in CI.
+
+Modelled directly on a real incident: an offline training set with 4,001 engineered features
+against an online scorer that could only produce 28 real-time keys.
+"""
+from __future__ import annotations
+
+import math
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from typing import Any, Iterator, Sequence
+
+MISSING = object()
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    name: str
+    dtype: str = "num"                # "num" | "cat" | "bool"
+    required: bool = True
+    rel_tol: float = 1e-6             # float32-vs-float64 slack; NOT exact equality
+    abs_tol: float = 1e-9
+    online_default: Any = None        # what serving substitutes on a feature-store miss
+
+
+@dataclass(frozen=True)
+class Mismatch:
+    entity: str
+    feature: str
+    kind: str
+    offline: Any = None
+    online: Any = None
+    detail: str = ""
+
+
+KINDS = ("missing_online", "missing_offline", "missing_both", "null_vs_value",
+         "type", "suspect_default", "value", "unspecified_online", "unspecified_offline")
+
+
+def _isnull(v: Any) -> bool:
+    return v is None or (isinstance(v, float) and v != v)          # v != v catches NaN
+
+
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def compare_entity(entity: str, offline: dict[str, Any], online: dict[str, Any],
+                   specs: Sequence[FeatureSpec],
+                   report_unspecified: bool = True) -> Iterator[Mismatch]:
+    """Yield (never accumulate) every discrepancy for one entity."""
+    known: set[str] = set()
+    for sp in specs:
+        known.add(sp.name)
+        off = offline.get(sp.name, MISSING)
+        on = online.get(sp.name, MISSING)
+
+        if off is MISSING and on is MISSING:
+            if sp.required:
+                yield Mismatch(entity, sp.name, "missing_both")
+            continue
+        if on is MISSING:
+            yield Mismatch(entity, sp.name, "missing_online", offline=off,
+                           detail="trained on it, cannot serve it")
+            continue
+        if off is MISSING:
+            yield Mismatch(entity, sp.name, "missing_offline", online=on,
+                           detail="served but never trained on")
+            continue
+        if _isnull(off) != _isnull(on):
+            yield Mismatch(entity, sp.name, "null_vs_value", off, on,
+                           detail="null on one side only; for a tree model these differ")
+            continue
+        if _isnull(off):
+            continue                                              # null on both sides: fine
+
+        if sp.dtype == "num":
+            if not (_num(off) and _num(on)):
+                yield Mismatch(entity, sp.name, "type", off, on,
+                               f"{type(off).__name__} vs {type(on).__name__}")
+                continue
+            if (sp.online_default is not None
+                    and float(on) == float(sp.online_default)
+                    and float(off) != float(sp.online_default)):
+                yield Mismatch(entity, sp.name, "suspect_default", off, on,
+                               f"online == default {sp.online_default!r}: silent store miss?")
+                continue
+            if not math.isclose(float(off), float(on), rel_tol=sp.rel_tol, abs_tol=sp.abs_tol):
+                yield Mismatch(entity, sp.name, "value", off, on,
+                               f"abs_diff={abs(float(off)-float(on)):.6g}")
+        else:
+            if type(off) is not type(on):
+                yield Mismatch(entity, sp.name, "type", off, on,
+                               f"{type(off).__name__} vs {type(on).__name__}")
+            elif off != on:
+                yield Mismatch(entity, sp.name, "value", off, on)
+
+    if report_unspecified:
+        for k in offline.keys() - known:
+            yield Mismatch(entity, k, "unspecified_offline", offline=offline[k],
+                           detail="in the training frame but not in the contract")
+        for k in online.keys() - known:
+            yield Mismatch(entity, k, "unspecified_online", online=online[k],
+                           detail="serving invented a feature the contract does not know")
+
+
+class ParityAccumulator:
+    """Folds mismatches into bounded state: counts everywhere, a few examples per (feature, kind).
+
+    Bounded on purpose. The incident this is built for produced ~4,000 mismatches per entity;
+    a checker that materialises them all dies before it can tell you what is wrong.
+    """
+
+    def __init__(self, specs: Sequence[FeatureSpec], max_examples: int = 2) -> None:
+        self.specs = list(specs)
+        self.max_examples = max_examples
+        self.entities = 0
+        self.kind_counts: Counter = Counter()
+        self.feature_kind: dict[str, Counter] = defaultdict(Counter)
+        self.examples: dict[tuple[str, str], list[Mismatch]] = defaultdict(list)
+
+    def add(self, entity: str, offline: dict[str, Any], online: dict[str, Any]) -> int:
+        self.entities += 1
+        n = 0
+        for m in compare_entity(entity, offline, online, self.specs):
+            n += 1
+            self.kind_counts[m.kind] += 1
+            self.feature_kind[m.feature][m.kind] += 1
+            bucket = self.examples[(m.feature, m.kind)]
+            if len(bucket) < self.max_examples:
+                bucket.append(m)
+        return n
+
+    def report(self, top: int = 5) -> dict[str, Any]:
+        checked = self.entities * len(self.specs)
+        bad = sum(self.kind_counts.values())
+        worst = sorted(self.feature_kind.items(),
+                       key=lambda kv: -sum(kv[1].values()))[:top]
+        return {
+            "entities": self.entities,
+            "features_in_contract": len(self.specs),
+            "comparisons": checked,
+            "mismatches": bad,
+            "parity_score": round(1 - bad / checked, 6) if checked else 1.0,
+            "by_kind": dict(self.kind_counts.most_common()),
+            "worst_features": [(f, dict(c)) for f, c in worst],
+        }
+
+
+class ParityGateFailed(AssertionError):
+    pass
+
+
+def gate(report: dict[str, Any], *, min_parity: float = 0.999,
+         forbidden: tuple[str, ...] = ("missing_online", "suspect_default", "type")) -> None:
+    """Call this in CI before a model promotion. Fail the build, not the customer."""
+    problems = [k for k in forbidden if report["by_kind"].get(k)]
+    if problems or report["parity_score"] < min_parity:
+        raise ParityGateFailed(
+            f"parity={report['parity_score']} (min {min_parity}); "
+            f"forbidden kinds present: { {k: report['by_kind'][k] for k in problems} }")
+
+
+# ---------------------------------------------------------------- the 4,001-vs-28 simulation
+def build_incident(n_entities: int = 100) -> tuple[ParityAccumulator, dict[str, Any]]:
+    import random
+    rng = random.Random(4001)
+
+    N_OFFLINE, N_ONLINE = 4001, 28
+    specs = [FeatureSpec(f"f{i:04d}", dtype="num", online_default=0.0)
+             for i in range(N_OFFLINE)]
+    acc = ParityAccumulator(specs, max_examples=2)
+
+    for e in range(n_entities):
+        eid = f"user-{e}"
+        offline = {f"f{i:04d}": round(rng.uniform(0.1, 9.9), 6) for i in range(N_OFFLINE)}
+        # the serving path can only compute the first 28 keys in real time
+        online = {k: offline[k] for k in (f"f{i:04d}" for i in range(N_ONLINE))}
+        # three of those come back as the store's default fill -> SILENT, not an error
+        for i in (3, 11, 19):
+            online[f"f{i:04d}"] = 0.0
+        # one is genuinely stale (recomputed from a different window)
+        online["f0005"] = offline["f0005"] * 1.15
+        # one arrives as a string because the online store is schemaless JSON
+        online["f0007"] = str(offline["f0007"])
+        # and serving invented a key nobody trained on
+        online["realtime_session_len"] = 42
+        acc.add(eid, offline, online)
+
+    return acc, acc.report()
+
+
+def main() -> None:
+    acc, rep = build_incident(n_entities=100)
+    print("  parity report (4,001 offline features vs 28 online keys):")
+    for k, v in rep.items():
+        if k != "worst_features":
+            print(f"    {k}: {v}")
+    print("    example suspect_default:",
+          acc.examples[("f0003", "suspect_default")][0])
+    print("    example type mismatch  :",
+          acc.examples[("f0007", "type")][0])
+
+    n = rep["entities"]
+    assert rep["by_kind"]["missing_online"] == (4001 - 28) * n
+    assert rep["by_kind"]["suspect_default"] == 3 * n
+    assert rep["by_kind"]["value"] == 1 * n              # f0005, 15% off
+    assert rep["by_kind"]["type"] == 1 * n               # f0007, str vs float
+    assert rep["by_kind"]["unspecified_online"] == 1 * n
+    assert rep["parity_score"] < 0.01                    # 0.6%: the model was never going to work
+
+    try:
+        gate(rep)
+        raise AssertionError("the gate must fail on this")
+    except ParityGateFailed as e:
+        print(f"    CI gate correctly failed: {str(e)[:96]}...")
+
+    # --- a healthy pair passes the same gate
+    ok_specs = [FeatureSpec("age"), FeatureSpec("balance", rel_tol=1e-5),
+                FeatureSpec("segment", dtype="cat"), FeatureSpec("is_new", dtype="bool")]
+    ok = ParityAccumulator(ok_specs)
+    for i in range(50):
+        off = {"age": 31.0, "balance": 1234.5678, "segment": "salaried", "is_new": False}
+        on = {"age": 31.0, "balance": 1234.5678 * (1 + 1e-7),   # float32 rounding: tolerated
+              "segment": "salaried", "is_new": False}
+        ok.add(f"u{i}", off, on)
+    ok_rep = ok.report()
+    assert ok_rep["mismatches"] == 0 and ok_rep["parity_score"] == 1.0
+    gate(ok_rep)
+    print(f"    healthy pair: parity={ok_rep['parity_score']}, gate passed")
+
+    # --- null is not zero
+    nz = ParityAccumulator([FeatureSpec("last_txn_days", online_default=0.0)])
+    nz.add("u1", {"last_txn_days": None}, {"last_txn_days": 0.0})
+    assert nz.report()["by_kind"] == {"null_vs_value": 1}
+
+    print("6.10 feature parity: all checks passed")
+
+
+main()
+```
+
+#### Complexity
+`O(E x F)` time for E entities and F features in the contract, `O(F + kinds x max_examples)` space —
+independent of E, which is the property that lets you run it over the whole scoring log rather than
+a 10-row sample. In production you would sample E (a few thousand entities is statistically plenty
+to find a systematic gap) and run it as a scheduled job, not once at release.
+
+#### Follow-ups
+- **"Where do you run this?"** Three places, and say all three: (1) in CI on a golden fixture before
+  any model promotion; (2) as a scheduled job that replays a sample of production requests through
+  the offline pipeline and diffs; (3) as a **shadow/dual-write** — log the online vector with every
+  prediction, join it to the offline vector computed later on the same entity, and alert on the
+  parity score. Option (3) is the only one that catches drift introduced *after* release.
+- **"How do you prevent it structurally?"** One feature definition, two execution paths — a feature
+  store or a shared transformation library, so training and serving cannot diverge by construction.
+  Then a contract test that fails the build when a feature exists offline with no online
+  implementation. Parity checking is the detector; a shared definition is the cure.
+- **"What tolerance?"** Float32 serving versus float64 training is ~1e-7 relative; `rel_tol=1e-6` is
+  the sane floor. Set it per feature, because a monetary sum and a normalised ratio deserve different
+  slack. An alert that fires on every deploy is an alert that is muted by Friday.
+- **"Extend it to distributions."** Per-entity parity catches *plumbing*. Feed the same offline and
+  online samples into PSI/KS (6.11) to catch *statistical* skew: correct plumbing, different
+  distribution, because the online window is 24 hours and the offline window was 30 days.
+
+#### Anchor to my experience
+> **Say it like this:** "I built this because I lived it. At TrueBalance a model that looked healthy
+> offline collapsed in production, and the cause was a train/serve feature-parity gap: the offline
+> training set had 4,001 engineered features, and the real-time path could only produce 28 keys.
+> The reason it took diagnosis rather than an alert is that the failure was silent — the serving
+> layer filled missing features with a default, so every request produced a well-formed vector and a
+> plausible-looking score. Nothing was throwing. What I would have wanted on day one is exactly this
+> utility: a schema-driven diff between the offline and online vector for the same entity, with
+> `missing_online` and `suspect_default` as hard CI gates before any promotion, plus a sampled
+> shadow job in production so the gap can never re-open quietly."
+
+---
+
+### 6.11 Drift: PSI and the two-sample KS statistic in pure Python
+
+#### Statement
+Given a baseline sample (training distribution) and a current sample (last 24 hours of production),
+compute the **Population Stability Index** with binning, and a **two-sample Kolmogorov–Smirnov**
+statistic with a p-value. No numpy, no scipy.
+
+#### Clarifying questions
+- Numeric or categorical? (Categorical PSI skips binning and uses the observed categories, plus an
+  "unseen category" bucket — which is itself a drift signal.)
+- Quantile bins from the baseline, or fixed-width? (Quantile, almost always — fixed-width bins on a
+  skewed feature put 98% of the mass in one bin and PSI stops reacting.)
+- What sample sizes? KS on 2 million rows will call *any* difference significant; the effect size
+  matters more than the p-value at that scale.
+- Are we drifting a **feature** or the **score**? Score drift with stable features means the model
+  changed; feature drift with a stable score means the model is ignoring the drifted feature.
+
+#### Approach
+PSI = `sum over bins of (q_i - p_i) * ln(q_i / p_i)`, a symmetrised (Jeffreys) divergence between the
+baseline proportions `p` and the current proportions `q`. Two traps:
+
+1. **The zero-bin trap.** If a bin is empty in the current sample, `ln(0)` is `-inf` and the whole
+   PSI becomes `inf` or `nan`. Everyone hits this. Fix it explicitly and say which fix you used:
+   an epsilon floor (simple, slightly arbitrary) or additive/Laplace smoothing
+   `(count + 0.5) / (n + bins*0.5)` (principled, and what I default to). Never leave it to chance.
+2. **Bins come from the baseline only**, then are frozen. Re-deriving quantile bins from the current
+   sample every run compares two moving targets and PSI becomes meaningless.
+
+The thresholds `< 0.1` stable / `0.1–0.25` moderate / `> 0.25` significant are **credit-scoring
+conventions**, not laws of nature. They are sensitive to bin count and sample size. Say so — a
+candidate who quotes 0.25 as if it were a theorem is a candidate who has never had to defend an
+alert threshold to a risk team.
+
+KS is the max vertical distance between the two empirical CDFs. It needs no binning at all (a real
+advantage over PSI) but is only defined for continuous univariate data, and is most sensitive near
+the median, least sensitive in the tails — which is often exactly where credit risk lives.
+
+```python
+"""PSI and two-sample KS from scratch: binning, the zero-bin trap, and honest thresholds."""
+from __future__ import annotations
+
+import bisect
+import math
+import random
+from collections import Counter
+from typing import Sequence
+
+
+# ---------------------------------------------------------------- binning
+def quantile_edges(baseline: Sequence[float], bins: int = 10) -> list[float]:
+    """Interior cut points from the BASELINE only, then frozen. Deduped so ties cannot
+    create empty bins (a heavily-tied feature legitimately yields fewer than `bins` bins)."""
+    s = sorted(baseline)
+    n = len(s)
+    if n == 0:
+        raise ValueError("empty baseline")
+    edges: list[float] = []
+    for i in range(1, bins):
+        idx = min(n - 1, max(0, int(i * n / bins)))
+        e = s[idx]
+        if not edges or e > edges[-1]:
+            edges.append(e)
+    return edges
+
+
+def bucketize(values: Sequence[float], edges: Sequence[float]) -> list[int]:
+    counts = [0] * (len(edges) + 1)
+    for v in values:
+        counts[bisect.bisect_right(edges, v)] += 1
+    return counts
+
+
+def _proportions(counts: Sequence[int], method: str, eps: float) -> list[float]:
+    n = sum(counts)
+    b = len(counts)
+    if method == "laplace":                    # additive smoothing: principled, my default
+        return [(c + 0.5) / (n + 0.5 * b) for c in counts]
+    return [max(c / n, eps) for c in counts]   # epsilon floor: simple, slightly arbitrary
+
+
+def psi(baseline: Sequence[float], current: Sequence[float], bins: int = 10,
+        method: str = "laplace", eps: float = 1e-6
+        ) -> tuple[float, list[dict], list[float]]:
+    """Population Stability Index + the per-bin contributions (which is what you actually
+    show a stakeholder: 'bin 9 contributes 80% of the PSI' beats a single number)."""
+    edges = quantile_edges(baseline, bins)
+    bc, cc = bucketize(baseline, edges), bucketize(current, edges)
+    p, q = _proportions(bc, method, eps), _proportions(cc, method, eps)
+    detail, total = [], 0.0
+    for i, (pi, qi) in enumerate(zip(p, q)):
+        term = (qi - pi) * math.log(qi / pi)
+        total += term
+        detail.append({"bin": i, "lo": None if i == 0 else edges[i - 1],
+                       "hi": None if i == len(edges) else edges[i],
+                       "base_n": bc[i], "curr_n": cc[i],
+                       "base_pct": round(pi, 5), "curr_pct": round(qi, 5),
+                       "contribution": round(term, 6)})
+    return total, detail, edges
+
+
+def psi_categorical(baseline: Sequence[str], current: Sequence[str],
+                    method: str = "laplace") -> tuple[float, list[str]]:
+    """Categorical PSI. Unseen-in-baseline categories are a drift signal in their own right."""
+    b, c = Counter(baseline), Counter(current)
+    cats = sorted(set(b) | set(c))
+    unseen = sorted(set(c) - set(b))
+    bc = [b[k] for k in cats]
+    cc = [c[k] for k in cats]
+    p, q = _proportions(bc, method, 1e-6), _proportions(cc, method, 1e-6)
+    return sum((qi - pi) * math.log(qi / pi) for pi, qi in zip(p, q)), unseen
+
+
+def psi_verdict(value: float) -> str:
+    """Conventional bands (credit scoring). Conventions, not laws -- they move with bin count."""
+    if value != value or value == math.inf:
+        return "invalid"
+    if value < 0.10:
+        return "stable"
+    if value < 0.25:
+        return "moderate shift - investigate"
+    return "significant shift - act"
+
+
+# ---------------------------------------------------------------- KS
+def ks_2samp(a: Sequence[float], b: Sequence[float]) -> float:
+    """Max vertical gap between the two empirical CDFs. O(n log n) for the sorts, then O(n+m).
+    Ties are handled by advancing BOTH samples past the same value before measuring."""
+    x, y = sorted(a), sorted(b)
+    n, m = len(x), len(y)
+    if n == 0 or m == 0:
+        raise ValueError("both samples must be non-empty")
+    i = j = 0
+    d = 0.0
+    while i < n and j < m:
+        v = x[i] if x[i] <= y[j] else y[j]
+        while i < n and x[i] == v:
+            i += 1
+        while j < m and y[j] == v:
+            j += 1
+        d = max(d, abs(i / n - j / m))
+    return max(d, abs(i / n - j / m))
+
+
+def ks_pvalue(d: float, n: int, m: int, terms: int = 200) -> float:
+    """Asymptotic two-sided p-value via the Kolmogorov distribution:
+    Q(lam) = 2 * sum_{k>=1} (-1)^(k-1) exp(-2 k^2 lam^2), with the Stephens correction."""
+    ne = n * m / (n + m)
+    lam = (math.sqrt(ne) + 0.12 + 0.11 / math.sqrt(ne)) * d
+    if lam <= 0:
+        return 1.0
+    s = 0.0
+    for k in range(1, terms + 1):
+        term = (-1) ** (k - 1) * math.exp(-2.0 * k * k * lam * lam)
+        s += term
+        if abs(term) < 1e-12:
+            break
+    return min(1.0, max(0.0, 2.0 * s))
+
+
+def ks_critical(n: int, m: int, alpha: float = 0.05) -> float:
+    """Reject if D exceeds this. c(0.05)=1.36 is the standard constant."""
+    c = {0.10: 1.22, 0.05: 1.36, 0.01: 1.63}[alpha]
+    return c * math.sqrt((n + m) / (n * m))
+
+
+# ---------------------------------------------------------------- tests
+def test_no_drift() -> None:
+    rng = random.Random(1)
+    base = [rng.gauss(0, 1) for _ in range(6000)]
+    curr = [rng.gauss(0, 1) for _ in range(6000)]
+    v, detail, _ = psi(base, curr)
+    d = ks_2samp(base, curr)
+    p = ks_pvalue(d, len(base), len(curr))
+    assert v < 0.1 and psi_verdict(v) == "stable", v
+    assert p > 0.05 and d < ks_critical(len(base), len(curr))
+    print(f"  same distribution : PSI={v:.4f} ({psi_verdict(v)})  KS D={d:.4f} p={p:.3f}")
+
+
+def test_mean_shift_is_caught() -> None:
+    rng = random.Random(2)
+    base = [rng.gauss(0, 1) for _ in range(6000)]
+    curr = [rng.gauss(1.0, 1) for _ in range(6000)]
+    v, detail, _ = psi(base, curr)
+    d = ks_2samp(base, curr)
+    p = ks_pvalue(d, len(base), len(curr))
+    assert v > 0.25 and psi_verdict(v) == "significant shift - act", v
+    assert p < 1e-6 and d > ks_critical(len(base), len(curr))
+    worst = max(detail, key=lambda r: r["contribution"])
+    print(f"  1-sigma shift     : PSI={v:.4f} ({psi_verdict(v)})  KS D={d:.4f} p={p:.2e}")
+    print(f"    worst bin: {worst['bin']} base={worst['base_pct']:.3f} "
+          f"curr={worst['curr_pct']:.3f} contributes {worst['contribution']:.4f}")
+
+
+def test_variance_shift_psi_beats_nothing() -> None:
+    rng = random.Random(3)
+    base = [rng.gauss(0, 1) for _ in range(6000)]
+    curr = [rng.gauss(0, 2) for _ in range(6000)]        # same mean, fatter tails
+    v, _, _ = psi(base, curr)
+    d = ks_2samp(base, curr)
+    assert v > 0.1 and d > ks_critical(6000, 6000)
+    print(f"  variance blow-up  : PSI={v:.4f} ({psi_verdict(v)})  KS D={d:.4f}")
+
+
+def test_zero_bin_trap() -> None:
+    rng = random.Random(4)
+    base = [rng.gauss(0, 1) for _ in range(4000)]
+    curr = [x for x in (rng.gauss(0, 1) for _ in range(4000)) if x < 0.5]  # upper bins now EMPTY
+    naive_p = [c / len(base) for c in bucketize(base, quantile_edges(base))]
+    naive_q = [c / len(curr) for c in bucketize(curr, quantile_edges(base))]
+    assert any(q == 0.0 for q in naive_q)                 # the trap is real
+    try:
+        sum((q - p) * math.log(q / p) for p, q in zip(naive_p, naive_q))
+        raise AssertionError("naive PSI should blow up on an empty bin")
+    except ValueError:
+        pass                                              # math domain error: log(0)
+    v_lap, _, _ = psi(base, curr, method="laplace")
+    v_eps, _, _ = psi(base, curr, method="epsilon")
+    assert math.isfinite(v_lap) and math.isfinite(v_eps)
+    assert v_lap > 0.25 and v_eps > 0.25
+    print(f"  empty-bin case    : laplace PSI={v_lap:.3f}, epsilon PSI={v_eps:.3f} "
+          f"(naive = math domain error)")
+
+
+def test_categorical_and_unseen() -> None:
+    base = ["salaried"] * 700 + ["self_employed"] * 250 + ["student"] * 50
+    curr = ["salaried"] * 400 + ["self_employed"] * 400 + ["student"] * 100 + ["gig"] * 100
+    v, unseen = psi_categorical(base, curr)
+    assert unseen == ["gig"] and v > 0.1
+    print(f"  categorical       : PSI={v:.4f}, categories never seen in baseline: {unseen}")
+
+
+def test_ks_edge_cases() -> None:
+    assert ks_2samp([1, 1, 1], [1, 1, 1]) == 0.0                 # identical, all ties
+    assert ks_2samp([0, 0, 0], [1, 1, 1]) == 1.0                 # disjoint support
+    assert abs(ks_2samp([1, 2, 3, 4], [1, 2, 3, 4])) < 1e-12
+    d = ks_2samp([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    assert abs(d - 0.5) < 1e-12, d
+
+
+def test_sample_size_caveat() -> None:
+    """The honest caveat: at large n, KS calls a trivially small difference 'significant'."""
+    rng = random.Random(9)
+    base = [rng.gauss(0, 1) for _ in range(200_000)]
+    curr = [rng.gauss(0.01, 1) for _ in range(200_000)]          # 0.01 sigma: meaningless
+    d = ks_2samp(base, curr)
+    p = ks_pvalue(d, len(base), len(curr))
+    v, _, _ = psi(base, curr)
+    print(f"  n=200k, 0.01-sigma: KS D={d:.5f} p={p:.4f}  PSI={v:.5f} ({psi_verdict(v)})")
+    assert v < 0.01                       # effect size stays honest even when p-values do not
+
+
+for t in (test_no_drift, test_mean_shift_is_caught, test_variance_shift_psi_beats_nothing,
+          test_zero_bin_trap, test_categorical_and_unseen, test_ks_edge_cases,
+          test_sample_size_caveat):
+    t()
+print("6.11 PSI / KS: all tests passed")
+```
+
+#### Complexity
+PSI: `O(n log n)` to build the baseline edges (once, then cached), `O(m log b)` to bucketize `m`
+current values across `b` bins via binary search, `O(b)` space. In production you compute and store
+the edges with the model artifact and only ever bucketize the incoming stream — a counter per bin is
+`O(b)` memory, which is why drift monitoring is cheap enough to run per hour. KS: `O(n log n + m log m)`
+for the sorts, `O(n + m)` for the merge walk, `O(n + m)` space (or `O(1)` extra if the inputs arrive
+sorted).
+
+#### Follow-ups
+- **"PSI or KS?"** PSI: works on categoricals, gives per-bin attribution you can show a business
+  stakeholder, but depends on bin choice. KS: no binning, has a real significance test, but numeric-
+  only, weak in the tails, and hypersensitive at large n. I run both, alert on PSI, and use KS as
+  the statistical sanity check. For *multivariate* drift, neither works — train a domain classifier
+  to separate baseline from current and read its AUC: 0.5 means indistinguishable, 0.8 means drift,
+  and the feature importances tell you *which* features moved.
+- **"Drift does not mean the model is broken."** Feature drift with stable performance is often just
+  a marketing campaign changing the customer mix. Always pair drift with a label-based metric when
+  labels exist, and remember that in lending your labels arrive 30–90 days late — that lag is exactly
+  why drift monitoring exists as a *leading* indicator.
+- **"Thresholds?"** Start at 0.1/0.25, then calibrate on historical data: replay 12 months, look at
+  the PSI distribution during known-healthy periods, and set the threshold above that noise floor.
+  A threshold you cannot justify from history will be muted within two weeks.
+- **"Where does this live?"** Batch job over yesterday's scoring log, edges loaded from the model
+  artifact, PSI per feature emitted as a metric, and an alert on sustained breach — not on a single
+  spike, which is usually an upstream job that ran late.
+
+#### Anchor to my experience
+> **Say it like this:** "Drift detection is the piece I built twice. At Tiger the NatWest SageMaker
+> platform had drift detection wired into the training/inference loop with automated retraining
+> behind it, in an FCA-regulated setting where you have to be able to explain *why* the model was
+> retrained. At ResMed I built the utility that took the thresholds and slice definitions the data
+> scientists authored and auto-provisioned Datadog dashboards and monitors from Snowflake feature
+> statistics — because the hard part of drift monitoring is not the statistic, it is making it
+> cheap enough that every new feature gets one without a human wiring up a dashboard."
+
+---
+
+### 6.12 Config resolution: defaults ← file ← env ← CLI
+
+#### Statement
+Merge configuration from four layers with strict precedence, handling nested dicts, lists, and the
+fact that environment variables are always strings.
+
+#### Clarifying questions
+- Lists: **replace or extend**? There is no right answer, so it must be an explicit, documented
+  choice — silent extension is how a `plugins` list ends up with three copies of the same entry.
+- Should an unknown key be an error or a pass-through? (Error, in a platform tool: a typo'd
+  `max_wokers` that silently does nothing has cost me hours.)
+- Do secrets come through this path? (They should not print. `__repr__` must redact.)
+- Is `null` in a file "unset" or "explicitly None"? They are genuinely different.
+
+#### Approach
+Right-fold of dicts, recursing only when **both** sides are mappings. Env vars are flattened names
+(`APP__SERVING__MAX_BATCH`), split on a separator, coerced against the **type of the default** — the
+defaults tree doubles as the schema, which means no separate schema file and no drift between them.
+CLI `--set a.b=c` overrides last. Unknown keys are rejected against the defaults tree, and secret-ish
+keys are redacted in the dump.
+
+```python
+"""Layered config: defaults <- file <- env <- CLI. Deep merge, type coercion, strict keys."""
+from __future__ import annotations
+
+import copy
+import json
+from typing import Any, Iterable, Mapping
+
+SECRET_HINTS = ("password", "secret", "token", "key", "credential")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+# ---------------------------------------------------------------- merge
+def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any], *,
+               list_strategy: str = "replace") -> dict[str, Any]:
+    """Recurse only when BOTH sides are mappings. Anything else is replaced wholesale.
+
+    list_strategy: 'replace' (default, predictable) | 'extend' (base + override)
+                 | 'unique'  (extend, de-duplicated, order preserved)
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if k in out and isinstance(out[k], Mapping) and isinstance(v, Mapping):
+            out[k] = deep_merge(out[k], v, list_strategy=list_strategy)
+        elif k in out and isinstance(out[k], list) and isinstance(v, list):
+            if list_strategy == "extend":
+                out[k] = list(out[k]) + list(v)
+            elif list_strategy == "unique":
+                seen, merged = set(), []
+                for item in list(out[k]) + list(v):
+                    marker = json.dumps(item, sort_keys=True, default=str)
+                    if marker not in seen:
+                        seen.add(marker)
+                        merged.append(item)
+                out[k] = merged
+            else:
+                out[k] = list(v)
+        else:
+            out[k] = copy.deepcopy(v) if isinstance(v, (dict, list)) else v
+    return out
+
+
+# ---------------------------------------------------------------- coercion
+_TRUE = {"1", "true", "yes", "on", "y", "t"}
+_FALSE = {"0", "false", "no", "off", "n", "f"}
+
+
+def coerce_like(default: Any, raw: str) -> Any:
+    """Coerce an env string to the type of the default. The defaults tree IS the schema."""
+    if isinstance(default, bool):                    # check BEFORE int: bool is a subclass of int
+        low = raw.strip().lower()
+        if low in _TRUE:
+            return True
+        if low in _FALSE:
+            return False
+        raise ConfigError(f"cannot read {raw!r} as a bool")
+    if isinstance(default, int):
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise ConfigError(f"cannot read {raw!r} as an int") from e
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise ConfigError(f"cannot read {raw!r} as a float") from e
+    if isinstance(default, list):
+        s = raw.strip()
+        if s.startswith("["):
+            return json.loads(s)
+        return [p.strip() for p in s.split(",") if p.strip()]
+    if isinstance(default, dict):
+        return json.loads(raw)
+    if default is None:                              # unknown type: best effort, then string
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    return raw
+
+
+# ---------------------------------------------------------------- path helpers
+def get_path(tree: Mapping[str, Any], parts: Iterable[str]) -> Any:
+    node: Any = tree
+    for p in parts:
+        if not isinstance(node, Mapping) or p not in node:
+            raise KeyError(".".join(parts))
+        node = node[p]
+    return node
+
+
+def set_path(tree: dict[str, Any], parts: list[str], value: Any) -> None:
+    node = tree
+    for p in parts[:-1]:
+        node = node.setdefault(p, {})
+        if not isinstance(node, dict):
+            raise ConfigError(f"cannot descend into non-mapping at {p!r}")
+    node[parts[-1]] = value
+
+
+# ---------------------------------------------------------------- layers
+def env_layer(environ: Mapping[str, str], defaults: Mapping[str, Any],
+              prefix: str = "APP", sep: str = "__", strict: bool = True) -> dict[str, Any]:
+    """APP__SERVING__MAX_BATCH=64 -> {"serving": {"max_batch": 64}}, typed off the defaults."""
+    layer: dict[str, Any] = {}
+    head = prefix + sep
+    for name, raw in environ.items():
+        if not name.startswith(head):
+            continue
+        parts = [p.lower() for p in name[len(head):].split(sep) if p]
+        if not parts:
+            continue
+        try:
+            default = get_path(defaults, parts)
+        except KeyError:
+            if strict:
+                raise ConfigError(f"env {name} maps to unknown config key {'.'.join(parts)!r}")
+            default = None
+        set_path(layer, parts, coerce_like(default, raw))
+    return layer
+
+
+def cli_layer(overrides: Iterable[str], defaults: Mapping[str, Any],
+              strict: bool = True) -> dict[str, Any]:
+    """--set serving.max_batch=64 --set model.name=loan_v4"""
+    layer: dict[str, Any] = {}
+    for item in overrides:
+        if "=" not in item:
+            raise ConfigError(f"--set expects key=value, got {item!r}")
+        key, raw = item.split("=", 1)
+        parts = [p for p in key.strip().split(".") if p]
+        try:
+            default = get_path(defaults, parts)
+        except KeyError:
+            if strict:
+                raise ConfigError(f"--set {key} is not a known config key")
+            default = None
+        set_path(layer, parts, coerce_like(default, raw))
+    return layer
+
+
+def resolve(defaults: Mapping[str, Any],
+            file_cfg: Mapping[str, Any] | None = None,
+            environ: Mapping[str, str] | None = None,
+            cli: Iterable[str] = (),
+            *, prefix: str = "APP", list_strategy: str = "replace",
+            strict: bool = True) -> tuple[dict[str, Any], dict[str, str]]:
+    """Returns (config, provenance). Provenance is not a nicety: 'why is max_batch 64 in prod'
+    is a question you will be asked at 2am, and the answer must not require reading four files."""
+    cfg = copy.deepcopy(dict(defaults))
+    provenance = {k: "default" for k in _flatten(defaults)}
+    for name, layer in (("file", dict(file_cfg or {})),
+                        ("env", env_layer(environ or {}, defaults, prefix, strict=strict)),
+                        ("cli", cli_layer(cli, defaults, strict=strict))):
+        if not layer:
+            continue
+        if strict and name == "file":
+            unknown = set(_flatten(layer)) - set(_flatten(defaults))
+            if unknown:
+                raise ConfigError(f"unknown config keys in file: {sorted(unknown)}")
+        cfg = deep_merge(cfg, layer, list_strategy=list_strategy)
+        for k in _flatten(layer):
+            provenance[k] = name
+    return cfg, provenance
+
+
+def _flatten(tree: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in tree.items():
+        path = f"{prefix}{k}"
+        if isinstance(v, Mapping):
+            out.update(_flatten(v, path + "."))
+        else:
+            out[path] = v
+    return out
+
+
+def redacted(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: ("***" if any(h in k.lower() for h in SECRET_HINTS) else v)
+            for k, v in _flatten(cfg).items()}
+
+
+# ---------------------------------------------------------------- tests
+DEFAULTS = {
+    "model": {"name": "loan_v3", "threshold": 0.5, "shadow": False},
+    "serving": {"max_batch": 32, "timeout_s": 1.5, "workers": 4,
+                "endpoints": ["primary"], "limits": {"rps": 100, "burst": 20}},
+    "storage": {"bucket": "models-prod", "prefix": "artifacts/"},
+    "api_token": "",
+}
+
+
+def test_precedence_chain() -> None:
+    file_cfg = {"model": {"threshold": 0.62}, "serving": {"max_batch": 64}}
+    env = {"APP__SERVING__MAX_BATCH": "128", "APP__MODEL__SHADOW": "true",
+           "APP__SERVING__LIMITS__RPS": "250", "IGNORED": "x"}
+    cli = ["serving.max_batch=256", "model.name=loan_v4"]
+    cfg, prov = resolve(DEFAULTS, file_cfg, env, cli)
+
+    assert cfg["serving"]["max_batch"] == 256 and prov["serving.max_batch"] == "cli"
+    assert cfg["model"]["shadow"] is True and prov["model.shadow"] == "env"
+    assert cfg["model"]["threshold"] == 0.62 and prov["model.threshold"] == "file"
+    assert cfg["serving"]["workers"] == 4 and prov["serving.workers"] == "default"
+    assert cfg["model"]["name"] == "loan_v4"
+    assert cfg["serving"]["limits"] == {"rps": 250, "burst": 20}   # sibling survived the merge
+    print(f"  precedence ok: max_batch=256 via {prov['serving.max_batch']}, "
+          f"threshold=0.62 via {prov['model.threshold']}")
+
+
+def test_env_types_are_coerced_not_strings() -> None:
+    env = {"APP__SERVING__MAX_BATCH": "64", "APP__MODEL__THRESHOLD": "0.71",
+           "APP__MODEL__SHADOW": "yes", "APP__SERVING__ENDPOINTS": "a,b,c"}
+    cfg, _ = resolve(DEFAULTS, None, env)
+    assert cfg["serving"]["max_batch"] == 64 and isinstance(cfg["serving"]["max_batch"], int)
+    assert cfg["model"]["threshold"] == 0.71 and isinstance(cfg["model"]["threshold"], float)
+    assert cfg["model"]["shadow"] is True                      # not the string "yes"
+    assert cfg["serving"]["endpoints"] == ["a", "b", "c"]
+    # the classic bug this prevents: bool("false") is True
+    assert bool("false") is True and cfg["model"]["shadow"] != "false"
+
+
+def test_bool_before_int_ordering() -> None:
+    assert coerce_like(False, "0") is False and coerce_like(False, "1") is True
+    assert coerce_like(0, "1") == 1 and isinstance(coerce_like(0, "1"), int)
+    try:
+        coerce_like(False, "maybe")
+        raise AssertionError("expected ConfigError")
+    except ConfigError:
+        pass
+
+
+def test_list_strategies_are_explicit() -> None:
+    base = {"serving": {"endpoints": ["primary"]}}
+    over = {"serving": {"endpoints": ["canary"]}}
+    assert deep_merge(base, over)["serving"]["endpoints"] == ["canary"]
+    assert deep_merge(base, over, list_strategy="extend")["serving"]["endpoints"] \
+        == ["primary", "canary"]
+    dup = deep_merge({"a": ["x", "y"]}, {"a": ["y", "z"]}, list_strategy="unique")
+    assert dup["a"] == ["x", "y", "z"]
+
+
+def test_nested_merge_does_not_clobber_siblings() -> None:
+    merged = deep_merge(DEFAULTS, {"serving": {"limits": {"rps": 500}}})
+    assert merged["serving"]["limits"] == {"rps": 500, "burst": 20}
+    assert merged["serving"]["workers"] == 4
+    assert DEFAULTS["serving"]["limits"]["rps"] == 100         # inputs never mutated
+
+
+def test_strict_rejects_typos() -> None:
+    for bad in ({"serving": {"max_wokers": 8}},):
+        try:
+            resolve(DEFAULTS, bad)
+            raise AssertionError("typo should be rejected")
+        except ConfigError as e:
+            assert "max_wokers" in str(e)
+    try:
+        resolve(DEFAULTS, None, {"APP__SERVING__NOPE": "1"})
+        raise AssertionError("unknown env key should be rejected")
+    except ConfigError:
+        pass
+    cfg, _ = resolve(DEFAULTS, {"serving": {"max_wokers": 8}}, strict=False)
+    assert cfg["serving"]["max_wokers"] == 8                   # opt-out exists, deliberately
+
+
+def test_secrets_redacted() -> None:
+    cfg, _ = resolve(DEFAULTS, None, {"APP__API_TOKEN": "sk-live-abcdef"})
+    assert cfg["api_token"] == "sk-live-abcdef"
+    assert redacted(cfg)["api_token"] == "***"
+    print(f"  dump is safe to log: api_token={redacted(cfg)['api_token']}")
+
+
+for t in (test_precedence_chain, test_env_types_are_coerced_not_strings,
+          test_bool_before_int_ordering, test_list_strategies_are_explicit,
+          test_nested_merge_does_not_clobber_siblings, test_strict_rejects_typos,
+          test_secrets_redacted):
+    t()
+print("6.12 config resolution: all tests passed")
+```
+
+#### Complexity
+`O(total leaf keys)` time and space across all layers — configs are tiny, so the interesting cost is
+zero. What matters is correctness: no shared mutable state (`deepcopy` on nested values, so two
+services created from the same defaults cannot poison each other), and provenance so the resolved
+value is explainable.
+
+#### Follow-ups
+- **"`bool('false')` is `True`."** Say this one out loud; it is the single most common config bug in
+  Python and the reason `isinstance(default, bool)` must be checked *before* `isinstance(default, int)`
+  (bool is a subclass of int, so the int branch would silently eat it).
+- **"Why not Pydantic Settings / dynaconf?"** In production, use them — `BaseSettings` does env
+  parsing, coercion and validation with real error messages. The value of writing it by hand is that
+  you then know precisely what the library is doing, which matters when it does something surprising
+  with a nested model or an `Optional[list[str]]`.
+- **"Secrets."** They should not come from a config file at all — env or a secret manager, resolved
+  late, never logged, never in a stack trace. The redaction here is a backstop, not a strategy.
+- **"Validation."** Merging is not validating. After resolving, assert invariants (`0 < threshold <
+  1`, `max_batch <= hardware limit`) and **fail at startup**, not on the first request. A service that
+  boots with a bad config and 500s an hour later is much harder to debug than one that refuses to
+  boot.
+
+---
+### 6.13 Idempotent job runner
+
+#### Statement
+An Airflow task can be re-triggered — by a retry, a manual clear, a scheduler restart, or two
+schedulers racing. Make a job run **at most once per logical key**, so a re-trigger does not
+double-write. Pluggable store.
+
+#### Clarifying questions
+- What is the idempotency key? Usually `(job_name, logical_date, input_content_hash)` — the content
+  hash is what makes a *changed* input re-run while an identical re-trigger does not.
+- Should a re-trigger return the previous result, or refuse? (Return it — callers want the answer,
+  not an error.)
+- What happens if a worker dies mid-run? Without a **lease**, that key is poisoned forever.
+- Is the sink itself idempotent (an upsert, a versioned S3 key) or append-only (a `+=`)? This changes
+  everything, and it is the question most candidates never ask.
+
+#### Approach
+A three-state record per key — `RUNNING` (with a lease deadline), `DONE` (with the result),
+`FAILED` — and an **atomic claim**. The claim must be one statement, not read-then-write: SQLite's
+`INSERT ... ON CONFLICT DO UPDATE ... WHERE` gives exactly-one-winner semantics under concurrency,
+and `cursor.rowcount` tells you whether you won. The same shape maps to `INSERT ... ON CONFLICT` in
+Postgres, a conditional `PutItem` in DynamoDB, or `SET NX PX` in Redis.
+
+The honest framing, which is the point of the question:
+
+- **At-most-once**: fire and forget. You lose work on failure.
+- **At-least-once**: retry until acknowledged. You get duplicates. This is what SQS, Kafka consumers
+  and Airflow retries actually give you.
+- **Exactly-once** end-to-end across a network boundary is not achievable in general. What *is*
+  achievable is **effectively-once**: at-least-once delivery plus an idempotent consumer — a dedupe
+  key in a transactional store, or a sink whose writes are naturally idempotent (upsert by primary
+  key, write to a content-addressed path). Kafka's "exactly-once semantics" is precisely this
+  (idempotent producer + transactional offset commit), *within* Kafka. Say that sentence and you
+  have answered the follow-up before it is asked.
+
+```python
+"""Idempotent job runner: content-hash keys, atomic claim, leases, pluggable store."""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import time
+import uuid
+from typing import Any, Callable, Protocol
+
+
+def content_key(job: str, params: dict[str, Any], version: str = "v1") -> str:
+    """Stable across processes and runs. json.dumps(sort_keys=True) is the whole trick;
+    hash(x) is NOT stable across processes (PYTHONHASHSEED), so never use it for this."""
+    blob = json.dumps({"job": job, "v": version, "params": params},
+                      sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+class RunStore(Protocol):
+    def get(self, key: str) -> dict | None: ...
+    def claim(self, key: str, token: str, lease_s: float, now: float) -> bool: ...
+    def finish(self, key: str, token: str, result: Any, now: float) -> bool: ...
+    def fail(self, key: str, token: str, err: str, now: float) -> bool: ...
+
+
+class SqliteRunStore:
+    """Durable store. The claim is ONE atomic statement -- read-then-write is a race."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                key         TEXT PRIMARY KEY,
+                state       TEXT NOT NULL CHECK (state IN ('RUNNING','DONE','FAILED')),
+                token       TEXT,
+                lease_until REAL,
+                result      TEXT,
+                error       TEXT,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                updated     REAL NOT NULL
+            )""")
+        self.conn.commit()
+
+    def get(self, key: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM runs WHERE key = ?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def claim(self, key: str, token: str, lease_s: float, now: float) -> bool:
+        """True iff WE own the run now. Claimable when: no row, previous FAILED, or the
+        previous RUNNING lease expired (the worker died). Never when DONE."""
+        cur = self.conn.execute("""
+            INSERT INTO runs (key, state, token, lease_until, result, error, attempts, updated)
+            VALUES (?, 'RUNNING', ?, ?, NULL, NULL, 1, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                state       = 'RUNNING',
+                token       = excluded.token,
+                lease_until = excluded.lease_until,
+                error       = NULL,
+                attempts    = runs.attempts + 1,
+                updated     = excluded.updated
+            WHERE runs.state = 'FAILED'
+               OR (runs.state = 'RUNNING' AND runs.lease_until < ?)
+            """, (key, token, now + lease_s, now, now))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def finish(self, key: str, token: str, result: Any, now: float) -> bool:
+        cur = self.conn.execute("""
+            UPDATE runs SET state='DONE', result=?, error=NULL, lease_until=NULL, updated=?
+            WHERE key=? AND token=?""",                 # token check = fencing
+            (json.dumps(result), now, key, token))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def fail(self, key: str, token: str, err: str, now: float) -> bool:
+        cur = self.conn.execute("""
+            UPDATE runs SET state='FAILED', error=?, lease_until=NULL, updated=?
+            WHERE key=? AND token=?""", (err, now, key, token))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+
+class Outcome:
+    RAN = "ran"
+    CACHED = "cached"
+    IN_PROGRESS = "in_progress"
+
+
+def run_once(store: RunStore, key: str, fn: Callable[[], Any], *,
+             lease_s: float = 300.0,
+             clock: Callable[[], float] = time.time,
+             token: str | None = None) -> tuple[str, Any]:
+    """Run fn at most once per key. Returns (outcome, result)."""
+    now = clock()
+    prior = store.get(key)
+    if prior and prior["state"] == "DONE":
+        return Outcome.CACHED, json.loads(prior["result"])
+
+    tok = token or uuid.uuid4().hex
+    if not store.claim(key, tok, lease_s, now):
+        cur = store.get(key)
+        if cur and cur["state"] == "DONE":                # someone finished while we looked
+            return Outcome.CACHED, json.loads(cur["result"])
+        return Outcome.IN_PROGRESS, None                  # another worker holds a live lease
+
+    try:
+        result = fn()
+    except Exception as exc:
+        store.fail(key, tok, f"{type(exc).__name__}: {exc}", clock())
+        raise
+    if not store.finish(key, tok, result, clock()):
+        # We lost the fence: our lease expired and someone else took over mid-run.
+        # The write we just made may be a duplicate -- which is exactly why the SINK
+        # must be idempotent too. A lease is a performance optimisation, not a lock.
+        raise RuntimeError(f"lost the lease for {key}; another worker owns it")
+    return Outcome.RAN, result
+
+
+# ---------------------------------------------------------------- tests
+class FakeClock:
+    def __init__(self, t: float = 1_700_000_000.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def store() -> SqliteRunStore:
+    return SqliteRunStore(sqlite3.connect(":memory:"))
+
+
+def test_second_trigger_does_not_double_write() -> None:
+    st, clk = store(), FakeClock()
+    side_effects: list[str] = []
+    key = content_key("daily_scores", {"ds": "2026-09-02", "model": "loan_v3"})
+
+    def job() -> dict:
+        side_effects.append("wrote 1.2M rows")
+        return {"rows": 1_200_000}
+
+    o1, r1 = run_once(st, key, job, clock=clk)
+    o2, r2 = run_once(st, key, job, clock=clk)            # Airflow cleared + re-ran the task
+    assert (o1, o2) == (Outcome.RAN, Outcome.CACHED)
+    assert r1 == r2 == {"rows": 1_200_000}
+    assert side_effects == ["wrote 1.2M rows"]            # exactly one side effect
+    print(f"  re-trigger -> {o2}, side effects: {len(side_effects)}")
+
+
+def test_content_hash_lets_changed_input_rerun() -> None:
+    st, clk = store(), FakeClock()
+    runs: list[float] = []
+    k1 = content_key("train", {"ds": "2026-09-02", "lr": 0.01})
+    k2 = content_key("train", {"ds": "2026-09-02", "lr": 0.02})     # a real change
+    k1b = content_key("train", {"lr": 0.01, "ds": "2026-09-02"})    # same thing, keys reordered
+    assert k1 == k1b and k1 != k2                                   # sort_keys makes this stable
+    for k in (k1, k2, k1b):
+        run_once(st, k, lambda: runs.append(1) or len(runs), clock=clk)
+    assert len(runs) == 2
+
+
+def test_concurrent_claim_has_exactly_one_winner() -> None:
+    st, clk = store(), FakeClock()
+    key = "k-concurrent"
+    assert st.claim(key, "worker-A", 300, clk()) is True
+    assert st.claim(key, "worker-B", 300, clk()) is False           # A holds a live lease
+    o, _ = run_once(st, key, lambda: "B result", clock=clk)
+    assert o == Outcome.IN_PROGRESS
+    assert st.finish(key, "worker-A", "A result", clk()) is True
+    o2, r2 = run_once(st, key, lambda: "C result", clock=clk)
+    assert (o2, r2) == (Outcome.CACHED, "A result")
+
+
+def test_dead_worker_lease_expiry_unblocks_the_key() -> None:
+    st, clk = store(), FakeClock()
+    key = "k-crash"
+    assert st.claim(key, "dead-worker", lease_s=60, now=clk()) is True
+    o, _ = run_once(st, key, lambda: "x", lease_s=60, clock=clk)
+    assert o == Outcome.IN_PROGRESS                                 # lease still alive
+    clk.advance(61)
+    o2, r2 = run_once(st, key, lambda: "recovered", lease_s=60, clock=clk)
+    assert (o2, r2) == (Outcome.RAN, "recovered")                   # lease expired -> reclaimed
+    assert st.get(key)["attempts"] == 2
+
+
+def test_failure_is_retryable_but_success_is_not() -> None:
+    st, clk = store(), FakeClock()
+    key, calls = "k-flaky", {"n": 0}
+
+    def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("s3 unavailable")
+        return "ok"
+
+    try:
+        run_once(st, key, flaky, clock=clk)
+        raise AssertionError("should propagate")
+    except ConnectionError:
+        pass
+    assert st.get(key)["state"] == "FAILED"
+    o, r = run_once(st, key, flaky, clock=clk)                      # retry is allowed
+    assert (o, r) == (Outcome.RAN, "ok") and calls["n"] == 2
+    o2, _ = run_once(st, key, flaky, clock=clk)                     # but success is final
+    assert o2 == Outcome.CACHED and calls["n"] == 2
+
+
+def test_fencing_token_rejects_a_zombie_worker() -> None:
+    st, clk = store(), FakeClock()
+    key = "k-zombie"
+    st.claim(key, "old", lease_s=10, now=clk())
+    clk.advance(11)
+    st.claim(key, "new", lease_s=10, now=clk())                     # new owner
+    assert st.finish(key, "old", "stale result", clk()) is False    # zombie write rejected
+    assert st.finish(key, "new", "fresh result", clk()) is True
+    assert json.loads(st.get(key)["result"]) == "fresh result"
+
+
+for t in (test_second_trigger_does_not_double_write,
+          test_content_hash_lets_changed_input_rerun,
+          test_concurrent_claim_has_exactly_one_winner,
+          test_dead_worker_lease_expiry_unblocks_the_key,
+          test_failure_is_retryable_but_success_is_not,
+          test_fencing_token_rejects_a_zombie_worker):
+    t()
+print("6.13 idempotent runner: all tests passed")
+```
+
+#### Complexity
+`O(1)` per run: one indexed primary-key lookup plus one upsert. Space is `O(distinct keys)`, which is
+the operational catch — the `runs` table grows forever unless you TTL it. Sweep rows older than the
+maximum plausible re-trigger window (`DELETE FROM runs WHERE updated < ?`), and be explicit that the
+retention window *is* your deduplication window: a re-trigger arriving after the sweep will re-run.
+
+#### Follow-ups
+- **"Is this exactly-once?"** No. It is at-least-once execution with effectively-once *effects*,
+  and only if the sink cooperates. There is a window between `fn()` completing its side effect and
+  `finish()` committing where a crash leaves the job re-runnable — so the write itself must be an
+  upsert or a content-addressed put. If the side effect and the state record can share one
+  transaction (both in Postgres), do that instead and the window closes.
+- **"Why a fencing token?"** A lease can expire while the original worker is merely slow, not dead —
+  a GC pause, a network partition. Two workers then believe they own the key. The monotonic token
+  check on `finish` means the stale worker's write is rejected; without it, the zombie overwrites the
+  new owner's result. This is Martin Kleppmann's fencing-token argument, and it applies to any lease-
+  based lock including Redlock.
+- **"Airflow specifically."** Prefer a naturally idempotent task: write to a deterministic partition
+  path (`s3://.../ds=2026-09-02/`) with overwrite semantics, so a re-run replaces rather than appends.
+  This runner is for the tasks you cannot make naturally idempotent — a third-party API call, a
+  payment, an email.
+- **"Distributed store?"** DynamoDB conditional writes (`attribute_not_exists(key) OR lease < :now`)
+  or Redis `SET key token NX PX ttl`. Same three states, same fencing, same TTL question.
+
+#### Anchor to my experience
+> **Say it like this:** "This is not theoretical for me — the TrueBalance scoring path consumes SQS,
+> and SQS is at-least-once by design. Visibility timeouts expire, messages redeliver, and a Lambda
+> can be invoked twice for the same event. So the handler had to be idempotent on the message key
+> before it was allowed anywhere near production, and the model artifacts are S3-versioned so a
+> replay resolves to the same artifact rather than whatever is newest. The framing I use is: assume
+> at-least-once delivery, then buy effectively-once with a dedupe key and an idempotent sink."
+
+---
+
+### 6.14 A tiny DAG scheduler — Airflow in 60 lines
+
+#### Statement
+Given tasks with dependencies, run them in dependency order with **maximum safe parallelism**.
+Detect cycles. If a task fails, skip everything downstream of it but let independent branches
+finish. Provide a `--dry-run` that prints the plan.
+
+#### Clarifying questions
+- Should a failure abort the whole DAG, or only the affected subgraph? (Only the subgraph — that is
+  what Airflow's `upstream_failed` state means, and it is almost always what you want.)
+- Do tasks need their upstream results, or do they communicate through storage? (Pass results in for
+  this exercise; note that Airflow deliberately does not, beyond small XComs.)
+- Any resource constraints beyond the worker count — a task pool, a per-task concurrency limit?
+- Retries per task? Timeouts?
+
+#### Approach
+Kahn's algorithm for the topological order, which gives cycle detection for free (if fewer nodes are
+emitted than exist, the remainder is a cycle — and you can *name* the members, which is what a user
+actually needs). For execution, do **not** run strict levels: a level barrier idles workers while
+one slow task in level 2 blocks a task in level 3 whose other dependencies are done. Instead keep a
+**ready set** and dispatch the moment a task's last dependency completes — `wait(FIRST_COMPLETED)`
+in a loop. Levels remain useful for the dry-run plan, because they are what a human wants to read.
+
+Failure propagation is a reverse-reachability walk: mark every transitive descendant `SKIPPED`.
+
+```python
+"""A tiny DAG scheduler: Kahn toposort, ready-set parallel execution, failure propagation."""
+from __future__ import annotations
+
+import time
+from collections import defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import Any, Callable, Mapping
+
+
+class CycleError(ValueError):
+    pass
+
+
+class State:
+    PENDING, RUNNING, SUCCESS, FAILED, SKIPPED = \
+        "PENDING", "RUNNING", "SUCCESS", "FAILED", "SKIPPED"
+
+
+def _validate(deps: Mapping[str, list[str]]) -> None:
+    for node, ups in deps.items():
+        for u in ups:
+            if u not in deps:
+                raise KeyError(f"task {node!r} depends on unknown task {u!r}")
+
+
+def topo_levels(deps: Mapping[str, list[str]]) -> list[list[str]]:
+    """Kahn, level by level. Level i can only start once every earlier level is done.
+    Also the cycle detector: anything left over is in (or downstream of) a cycle."""
+    _validate(deps)
+    indeg = {n: len(set(ups)) for n, ups in deps.items()}
+    children: dict[str, set[str]] = defaultdict(set)
+    for n, ups in deps.items():
+        for u in set(ups):
+            children[u].add(n)
+
+    levels: list[list[str]] = []
+    frontier = sorted(n for n, d in indeg.items() if d == 0)
+    emitted = 0
+    while frontier:
+        levels.append(frontier)
+        emitted += len(frontier)
+        nxt: list[str] = []
+        for n in frontier:
+            for c in sorted(children[n]):
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    nxt.append(c)
+        frontier = sorted(nxt)
+    if emitted != len(deps):
+        stuck = sorted(n for n, d in indeg.items() if d > 0)
+        raise CycleError(f"cycle detected among: {stuck}")
+    return levels
+
+
+def dry_run(deps: Mapping[str, list[str]], max_workers: int = 4) -> str:
+    levels = topo_levels(deps)
+    lines = [f"plan: {len(deps)} tasks, {len(levels)} levels, {max_workers} workers"]
+    for i, lvl in enumerate(levels):
+        waves = -(-len(lvl) // max_workers)          # ceil division
+        lines.append(f"  level {i}: {', '.join(lvl)}"
+                     f"{'' if waves <= 1 else f'   [{waves} waves at this width]'}")
+    return "\n".join(lines)
+
+
+def run_dag(deps: Mapping[str, list[str]],
+            tasks: Mapping[str, Callable[[dict[str, Any]], Any]],
+            max_workers: int = 4,
+            on_event: Callable[[str, str], None] | None = None
+            ) -> tuple[dict[str, str], dict[str, Any], dict[str, str]]:
+    """Execute with a ready-set (not level barriers): a task starts the instant its last
+    dependency finishes. Returns (states, results, errors)."""
+    topo_levels(deps)                                 # fail fast on cycles / unknown deps
+    missing = [n for n in deps if n not in tasks]
+    if missing:
+        raise KeyError(f"no callable for tasks: {missing}")
+
+    remaining = {n: set(ups) for n, ups in deps.items()}
+    children: dict[str, set[str]] = defaultdict(set)
+    for n, ups in deps.items():
+        for u in set(ups):
+            children[u].add(n)
+
+    states = {n: State.PENDING for n in deps}
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    ready = deque(sorted(n for n, ups in remaining.items() if not ups))
+
+    def emit(node: str, state: str) -> None:
+        states[node] = state
+        if on_event:
+            on_event(node, state)
+
+    def skip_descendants(node: str) -> None:
+        stack = list(children[node])
+        while stack:
+            c = stack.pop()
+            if states[c] == State.PENDING:
+                emit(c, State.SKIPPED)
+                stack.extend(children[c])
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        running: dict[Future, str] = {}
+        while ready or running:
+            while ready and len(running) < max_workers:
+                node = ready.popleft()
+                if states[node] != State.PENDING:      # skipped while it sat in the queue
+                    continue
+                emit(node, State.RUNNING)
+                upstream = {u: results[u] for u in deps[node] if u in results}
+                running[ex.submit(tasks[node], upstream)] = node
+            if not running:
+                continue
+            done, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for fut in done:
+                node = running.pop(fut)
+                try:
+                    results[node] = fut.result()
+                    emit(node, State.SUCCESS)
+                    for c in sorted(children[node]):
+                        remaining[c].discard(node)
+                        if not remaining[c] and states[c] == State.PENDING:
+                            ready.append(c)
+                except Exception as exc:
+                    errors[node] = f"{type(exc).__name__}: {exc}"
+                    emit(node, State.FAILED)
+                    skip_descendants(node)             # upstream_failed, Airflow-style
+    return states, results, errors
+
+
+# ---------------------------------------------------------------- tests
+DAG = {
+    "extract_txn":      [],
+    "extract_sms":      [],
+    "parse_sms":        ["extract_sms"],
+    "build_features":   ["extract_txn", "parse_sms"],
+    "validate":         ["build_features"],
+    "train":            ["validate"],
+    "evaluate":         ["train"],
+    "register":         ["evaluate"],
+    "publish_report":   ["evaluate"],
+    "refresh_dashboard": [],
+}
+
+
+def _mk(order: list[str], lock: Any, sleep_s: float = 0.01,
+        fail: set[str] = frozenset()) -> dict[str, Callable]:
+    def make(name: str) -> Callable[[dict[str, Any]], Any]:
+        def task(upstream: dict[str, Any]) -> str:
+            time.sleep(sleep_s)
+            with lock:
+                order.append(name)
+            if name in fail:
+                raise RuntimeError(f"{name} blew up")
+            return f"{name}({len(upstream)} inputs)"
+        return task
+    return {n: make(n) for n in DAG}
+
+
+def test_topological_levels_and_dry_run() -> None:
+    levels = topo_levels(DAG)
+    assert levels[0] == ["extract_sms", "extract_txn", "refresh_dashboard"]
+    assert levels[2] == ["build_features"]
+    # register and publish_report both hang off evaluate, so they share the final level
+    assert levels[-1] == ["publish_report", "register"]
+    flat = [n for lvl in levels for n in lvl]
+    pos = {n: i for i, n in enumerate(flat)}
+    for n, ups in DAG.items():                        # every dep precedes its dependent
+        for u in ups:
+            assert pos[u] < pos[n]
+    print(dry_run(DAG, max_workers=3))
+
+
+def test_cycle_is_named_not_just_detected() -> None:
+    bad = {"a": ["c"], "b": ["a"], "c": ["b"], "d": []}
+    try:
+        topo_levels(bad)
+        raise AssertionError("expected CycleError")
+    except CycleError as e:
+        members = str(e).split(":", 1)[1]
+        assert "'a'" in members and "'b'" in members and "'c'" in members
+        assert "'d'" not in members          # the independent task is not blamed
+        print(f"  cycle error names the members: {e}")
+
+
+def test_unknown_dependency_fails_fast() -> None:
+    try:
+        topo_levels({"a": ["ghost"]})
+        raise AssertionError("expected KeyError")
+    except KeyError:
+        pass
+
+
+def test_happy_path_respects_order_and_parallelism() -> None:
+    import threading
+    order: list[str] = []
+    lock = threading.Lock()
+    states, results, errors = run_dag(DAG, _mk(order, lock), max_workers=4)
+    assert errors == {}
+    assert all(s == State.SUCCESS for s in states.values())
+    pos = {n: i for i, n in enumerate(order)}
+    for n, ups in DAG.items():
+        for u in ups:
+            assert pos[u] < pos[n], f"{u} ran after {n}"
+    assert results["build_features"] == "build_features(2 inputs)"   # upstream results passed in
+    print(f"  execution order: {order}")
+
+
+def test_failure_skips_only_the_downstream_subgraph() -> None:
+    import threading
+    order: list[str] = []
+    lock = threading.Lock()
+    states, results, errors = run_dag(DAG, _mk(order, lock, fail={"validate"}), max_workers=4)
+    assert states["validate"] == State.FAILED
+    for downstream in ("train", "evaluate", "register", "publish_report"):
+        assert states[downstream] == State.SKIPPED, downstream
+    for unaffected in ("extract_txn", "extract_sms", "parse_sms",
+                       "build_features", "refresh_dashboard"):
+        assert states[unaffected] == State.SUCCESS, unaffected
+    assert "train" not in order                       # genuinely never executed
+    print(f"  validate failed -> skipped {sorted(k for k,v in states.items() if v=='SKIPPED')}; "
+          f"independent branch (refresh_dashboard) still SUCCESS")
+
+
+def test_parallelism_is_real() -> None:
+    import threading
+    wide = {f"t{i}": [] for i in range(8)}
+    wide["sink"] = [f"t{i}" for i in range(8)]
+    live = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def make(_name: str) -> Callable[[dict[str, Any]], Any]:
+        def task(_up: dict[str, Any]) -> int:
+            with lock:
+                live["now"] += 1
+                live["peak"] = max(live["peak"], live["now"])
+            time.sleep(0.03)
+            with lock:
+                live["now"] -= 1
+            return 1
+        return task
+
+    t0 = time.monotonic()
+    states, _, _ = run_dag(wide, {n: make(n) for n in wide}, max_workers=4)
+    dt = time.monotonic() - t0
+    assert all(s == State.SUCCESS for s in states.values())
+    assert live["peak"] == 4                          # exactly the worker cap, no more
+    assert dt < 0.25                                  # 9 x 30ms serial would be 0.27s+
+    print(f"  8 parallel tasks + sink, 4 workers: peak concurrency {live['peak']}, {dt*1000:.0f} ms")
+
+
+for t in (test_topological_levels_and_dry_run, test_cycle_is_named_not_just_detected,
+          test_unknown_dependency_fails_fast, test_happy_path_respects_order_and_parallelism,
+          test_failure_skips_only_the_downstream_subgraph, test_parallelism_is_real):
+    t()
+print("6.14 DAG scheduler: all tests passed")
+```
+
+#### Complexity
+Toposort: `O(V + E)` time, `O(V + E)` space — Kahn's algorithm touches each edge exactly once.
+Execution adds `O(V)` scheduling decisions; failure propagation is `O(V + E)` worst case across the
+whole run because each node is skipped at most once. Wall time is bounded below by the **critical
+path** (the longest dependency chain), no matter how many workers you add — that is the number to
+quote when someone asks why adding workers stopped helping.
+
+#### Follow-ups
+- **"Why not strict levels?"** A level barrier idles workers: if level 2 has one 10-minute task and
+  one 1-second task, nothing from level 3 starts for 10 minutes even if its other dependencies are
+  done. The ready-set version is strictly better and no harder to write. Levels are still the right
+  thing to *print*, because humans read plans in levels.
+- **"Retries and timeouts per task."** Wrap the callable with the retry decorator from 6.1 and
+  enforce the timeout inside the task (see 6.8 — you cannot cancel a running thread). A task that
+  exhausts retries transitions to FAILED and propagates as normal.
+- **"Trigger rules."** Airflow has `all_success` (this), `all_done`, `one_failed`, `none_failed`.
+  A cleanup task should be `all_done` so it runs even when upstream failed — model it by giving each
+  node a rule and checking it when its dependencies settle instead of only on success.
+- **"Distributed?"** State moves to a database, `ready` becomes a queue, workers claim tasks with
+  the atomic claim from 6.13, and each task needs a heartbeat so a dead worker's task can be
+  re-queued. At that point you have re-implemented Airflow's scheduler, and the correct answer is to
+  use Airflow, Step Functions or Dagster — but knowing exactly which 200 lines they are is the point.
+- **"Dynamic DAGs?"** A task that spawns tasks (Airflow's dynamic task mapping) breaks the static
+  toposort; you re-plan when a mapping task completes.
+
+#### Anchor to my experience
+> **Say it like this:** "The DAGs I actually own look exactly like the fixture in that test —
+> extract, parse, build features, validate, train, evaluate, register. I've orchestrated them with
+> Airflow and Azure Data Factory at Tiger, and with Step Functions on AWS. The design choice I care
+> about most here is the failure semantics: `validate` failing must not silently let `register`
+> promote a model. That gate is the same idea as the parity gate in 6.10 — a DAG edge is only as
+> useful as the check sitting on it."
+
+---
+
+### 6.15 Dedupe and windowed join of two event streams
+
+#### Statement
+Two streams — clicks and impressions, or transactions and SMS — keyed by user. Emit a joined pair
+when a left and a right event share a key and their timestamps are within `W` seconds. Events arrive
+**out of order**, may be **duplicated**, and memory must stay bounded.
+
+#### Clarifying questions
+- Event time or processing time? (Event time, always, for correctness — but then you need a
+  watermark to decide when to give up on stragglers.)
+- How late can an event be? That number is the whole memory/correctness trade.
+- Inner join, or do unmatched lefts need emitting after the window closes (left-outer)?
+- Fan-out: can one left match many rights, or is it strictly one-to-one? (One-to-many is the default
+  and can explode — 1,000 lefts and 1,000 rights on the same key in one window is 1,000,000 pairs.)
+
+#### Approach
+Three mechanisms, and I name them explicitly because these are the words a streaming interviewer is
+listening for:
+
+1. **Dedupe** by event id in a TTL'd set — bounded, and it *will* drop a genuine duplicate that
+   arrives after the TTL. Say that out loud; an unbounded dedupe set is a memory leak wearing a
+   correctness costume.
+2. **Watermark** = `max_event_time_seen − allowed_lateness`. It is the system's assertion that no
+   event older than this will arrive. Anything older is **late**: dropped and counted, never silently
+   discarded. The counter is what tells you your lateness bound is wrong.
+3. **Eviction** at `watermark − window`: below that line nothing can ever match again, so the buffers
+   are bounded by the number of events in the last `window + lateness` seconds — not by the stream.
+
+Emission is symmetric: when a left arrives, match it against the buffered rights (and vice versa),
+so ordering between the two streams does not matter.
+
+```python
+"""Dedupe + windowed inner join over two out-of-order event streams. Bounded memory."""
+from __future__ import annotations
+
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
+from typing import Iterator
+
+
+@dataclass(frozen=True)
+class Event:
+    id: str
+    key: str
+    ts: float                 # EVENT time (seconds), not arrival time
+    payload: dict
+
+
+class WindowedJoiner:
+    """Inner join of two streams on `key` where |left.ts - right.ts| <= window.
+
+    watermark = max_ts_seen - allowed_lateness. Buffers hold only events with
+    ts >= watermark - window, so memory is O(events in the last window+lateness).
+    """
+
+    def __init__(self, window: float, allowed_lateness: float = 0.0,
+                 dedupe_ttl: float | None = None) -> None:
+        self.window = window
+        self.allowed_lateness = allowed_lateness
+        self.dedupe_ttl = dedupe_ttl if dedupe_ttl is not None else window + allowed_lateness
+        self.left: dict[str, deque[Event]] = defaultdict(deque)
+        self.right: dict[str, deque[Event]] = defaultdict(deque)
+        self._seen: dict[str, float] = {}
+        self.max_ts = float("-inf")
+        self.stats: Counter = Counter()
+
+    @property
+    def watermark(self) -> float:
+        return self.max_ts - self.allowed_lateness
+
+    def push(self, side: str, ev: Event) -> list[tuple[Event, Event]]:
+        assert side in ("left", "right")
+        if ev.id in self._seen:
+            self.stats["duplicate_dropped"] += 1
+            return []
+        self._seen[ev.id] = ev.ts
+
+        if ev.ts > self.max_ts:
+            self.max_ts = ev.ts
+
+        if ev.ts < self.watermark - self.window:
+            self.stats["late_dropped"] += 1          # counted, never silent
+            return []
+
+        self.stats[f"{side}_accepted"] += 1
+        own = self.left if side == "left" else self.right
+        other = self.right if side == "left" else self.left
+        own[ev.key].append(ev)
+
+        out: list[tuple[Event, Event]] = []
+        for cand in other.get(ev.key, ()):
+            if abs(cand.ts - ev.ts) <= self.window:
+                pair = (ev, cand) if side == "left" else (cand, ev)
+                out.append(pair)
+        self.stats["emitted"] += len(out)
+        self._evict()
+        return out
+
+    def _evict(self) -> None:
+        cutoff = self.watermark - self.window
+        for buf in (self.left, self.right):
+            for key in list(buf):
+                dq = buf[key]
+                # deques are NOT sorted (out-of-order input), so filter rather than popleft
+                keep = deque(e for e in dq if e.ts >= cutoff)
+                self.stats["evicted"] += len(dq) - len(keep)
+                if keep:
+                    buf[key] = keep
+                else:
+                    del buf[key]                     # drop the key entirely: no per-key leak
+        for eid, ts in list(self._seen.items()):
+            if ts < self.max_ts - self.dedupe_ttl:
+                del self._seen[eid]
+
+    def buffered(self) -> int:
+        return sum(len(d) for d in self.left.values()) + sum(len(d) for d in self.right.values())
+
+
+def join_streams(events: list[tuple[str, Event]], window: float,
+                 allowed_lateness: float = 0.0) -> tuple[list[tuple[str, str]], Counter, int]:
+    j = WindowedJoiner(window, allowed_lateness)
+    pairs: list[tuple[str, str]] = []
+    for side, ev in events:
+        for l, r in j.push(side, ev):
+            pairs.append((l.id, r.id))
+    return pairs, j.stats, j.buffered()
+
+
+# ---------------------------------------------------------------- tests
+def E(i: str, k: str, t: float) -> Event:
+    return Event(id=i, key=k, ts=t, payload={})
+
+
+def test_basic_join_within_window() -> None:
+    evs = [("left", E("L1", "u1", 100.0)),
+           ("right", E("R1", "u1", 103.0)),        # 3s apart, inside a 5s window
+           ("right", E("R2", "u1", 120.0)),        # 20s apart, outside
+           ("left", E("L2", "u2", 100.0)),
+           ("right", E("R3", "u9", 100.0))]        # key with no partner
+    pairs, stats, _ = join_streams(evs, window=5.0)
+    assert pairs == [("L1", "R1")]
+    assert stats["emitted"] == 1
+
+
+def test_out_of_order_arrival_still_joins() -> None:
+    """The right event arrives BEFORE its left partner. Symmetric matching handles it."""
+    evs = [("right", E("R1", "u1", 103.0)),
+           ("left", E("L1", "u1", 100.0))]
+    pairs, _, _ = join_streams(evs, window=5.0)
+    assert pairs == [("L1", "R1")]                 # tuple order is always (left, right)
+
+
+def test_duplicates_are_dropped_once() -> None:
+    evs = [("left", E("L1", "u1", 100.0)),
+           ("left", E("L1", "u1", 100.0)),         # exact redelivery (at-least-once source)
+           ("right", E("R1", "u1", 101.0))]
+    pairs, stats, _ = join_streams(evs, window=5.0)
+    assert pairs == [("L1", "R1")]                 # NOT two pairs
+    assert stats["duplicate_dropped"] == 1
+
+
+def test_late_event_is_dropped_and_counted() -> None:
+    evs = [("left", E("L1", "u1", 100.0)),
+           ("right", E("R1", "u1", 1000.0)),       # jumps the watermark far forward
+           ("left", E("L2", "u1", 101.0))]         # now hopelessly late
+    pairs, stats, _ = join_streams(evs, window=5.0, allowed_lateness=0.0)
+    assert pairs == []
+    assert stats["late_dropped"] == 1
+
+
+def test_allowed_lateness_rescues_a_straggler() -> None:
+    evs = [("left", E("L1", "u1", 100.0)),
+           ("right", E("R2", "u2", 130.0)),        # watermark jumps to 130 - lateness
+           ("right", E("R1", "u1", 102.0))]        # 28s late, but lateness=60 keeps it alive
+    pairs, stats, _ = join_streams(evs, window=5.0, allowed_lateness=60.0)
+    assert pairs == [("L1", "R1")]
+    assert stats["late_dropped"] == 0
+
+
+def test_memory_stays_bounded_over_a_long_stream() -> None:
+    j = WindowedJoiner(window=5.0, allowed_lateness=2.0)
+    for i in range(20_000):
+        t = float(i)                               # one event per second, 20k distinct keys
+        j.push("left", E(f"L{i}", f"u{i}", t))
+        j.push("right", E(f"R{i}", f"u{i}", t + 1.0))
+    assert j.stats["emitted"] == 20_000
+    # only events with ts >= watermark - window survive: ~ (window + lateness) seconds' worth
+    assert j.buffered() < 40, j.buffered()
+    assert len(j.left) + len(j.right) < 40         # per-key dicts are pruned too, not just deques
+    assert len(j._seen) < 40
+    print(f"  20,000 joins over 20,000 keys -> {j.buffered()} events still buffered, "
+          f"{len(j._seen)} dedupe ids retained")
+
+
+def test_fanout_is_multiplicative() -> None:
+    """One-to-many is the default and it can explode. Know the number before you ship."""
+    j = WindowedJoiner(window=10.0)
+    for i in range(5):
+        j.push("left", E(f"L{i}", "hot_key", 100.0 + i * 0.1))
+    emitted = 0
+    for i in range(5):
+        emitted += len(j.push("right", E(f"R{i}", "hot_key", 100.0 + i * 0.1)))
+    assert emitted == 25                           # 5 x 5, not 5
+    print(f"  fan-out on a hot key: 5 left x 5 right = {emitted} pairs")
+
+
+for t in (test_basic_join_within_window, test_out_of_order_arrival_still_joins,
+          test_duplicates_are_dropped_once, test_late_event_is_dropped_and_counted,
+          test_allowed_lateness_rescues_a_straggler,
+          test_memory_stays_bounded_over_a_long_stream, test_fanout_is_multiplicative):
+    t()
+print("6.15 windowed join: all tests passed")
+```
+
+#### Complexity
+Per event: `O(m)` to match, where `m` is the number of buffered events for that key on the other side
+(typically 0–2, but see the fan-out test). Eviction as written is `O(active keys)` per push, which is
+the one thing I would fix for real volume — keep a global `deque` of `(ts, key, side)` in arrival
+order and pop from the front until the cutoff, making eviction `O(evicted)` amortised. Memory is
+`O(events within window + lateness)` plus the dedupe set, both independent of stream length — which
+is the whole design goal.
+
+#### Follow-ups
+- **"Watermarks in one sentence."** A watermark is a promise that no event older than time T will
+  arrive; it is what lets a windowed operator decide it is safe to emit and free state. Get it wrong
+  in the tight direction and you drop good data; wrong in the loose direction and state grows.
+  Either way, **emit the late-drop counter** — it is the only feedback signal you have.
+- **"Left-outer join?"** Keep unmatched lefts until `watermark > left.ts + window`, then emit
+  `(left, None)` on eviction. That converts eviction from a cleanup into an emission point, which is
+  exactly how Flink models it.
+- **"Exactly-once here?"** Same answer as 6.13: the dedupe set gives effectively-once within its TTL,
+  and downstream must tolerate a replay after a restart unless the buffer state is checkpointed.
+- **"Hot keys."** A power-law key distribution puts one key in 40% of events and the fan-out becomes
+  quadratic. Cap per-key buffer size, or salt the key and re-aggregate.
+- **"In production?"** Flink or Spark Structured Streaming with a state backend, or Kafka Streams'
+  windowed joins. Writing it by hand is how you understand what `withWatermark("ts", "10 minutes")`
+  is actually buying you.
+
+#### Anchor to my experience
+> **Say it like this:** "This is the shape of the SMS-plus-transaction problem I work on now. At
+> TrueBalance the parsed SMS entities have to line up with the transaction and application events
+> for the same user inside a time window before they become features, and both sides arrive out of
+> order because SMS ingestion is bursty. The knowledge graph gave me the canonical keys to join on —
+> that was the prerequisite — and the reason I care about the late-drop counter is the parity lesson
+> from the 4,001-vs-28 incident: a feature that silently drops events looks exactly like a feature
+> that is working."
+
+---
+
+### 6.16 Cosine similarity and top-k nearest neighbours, no numpy
+
+#### Statement
+Given a query embedding and a corpus of embeddings, return the top-k most similar by cosine
+similarity. Pure Python. Then say what you would actually do in production.
+
+#### Clarifying questions
+- Are the vectors already L2-normalised? If so, cosine **is** the dot product and the whole thing
+  gets cheaper.
+- Corpus size and dimension? 10k x 384 is a Python loop; 10M x 1536 is a vector database, full stop.
+- Do we need scores, or just the ranking? Are ties broken deterministically?
+- Any filtering (tenant, date)? Pre-filter versus post-filter is the single biggest correctness trap
+  in retrieval, and it belongs in the clarifying phase.
+
+#### Approach
+`cos(a,b) = dot(a,b) / (|a| * |b|)`. Two things make this senior rather than a textbook one-liner:
+
+1. **Normalise once at insert.** Then search is a bare dot product — you delete a square root and two
+   passes per candidate from the inner loop, which is most of the cost.
+2. **`heapq.nlargest(k, ...)`** rather than sorting everything: `O(n log k)` instead of `O(n log n)`,
+   and `O(k)` extra space. For n = 100k and k = 10 that is a ~4x difference in the comparison count.
+
+Then the honest production line: brute force is `O(n·d)` per query, which at 1M x 768 floats is about
+768M multiply-adds per query in pure Python — seconds, not milliseconds. You use FAISS (HNSW or IVF-PQ)
+or pgvector, and you accept approximate recall in exchange for sublinear search. Say the numbers.
+
+```python
+"""Cosine similarity + brute-force top-k ANN, pure stdlib. With the production caveat priced in."""
+from __future__ import annotations
+
+import heapq
+import math
+import random
+from typing import Iterable, Sequence
+
+
+def dot(a: Sequence[float], b: Sequence[float]) -> float:
+    if len(a) != len(b):
+        raise ValueError(f"dimension mismatch: {len(a)} vs {len(b)}")
+    return sum(x * y for x, y in zip(a, b))
+
+
+def norm(a: Sequence[float]) -> float:
+    return math.sqrt(sum(x * x for x in a))
+
+
+def cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    na, nb = norm(a), norm(b)
+    if na == 0.0 or nb == 0.0:
+        return 0.0                       # a zero vector has no direction; 0 beats ZeroDivisionError
+    return dot(a, b) / (na * nb)
+
+
+def l2_normalise(a: Sequence[float]) -> list[float]:
+    n = norm(a)
+    return [0.0] * len(a) if n == 0.0 else [x / n for x in a]
+
+
+class BruteForceIndex:
+    """Exact top-k over normalised vectors. Normalise at insert so search is a dot product."""
+
+    def __init__(self, dim: int) -> None:
+        self.dim = dim
+        self.ids: list[str] = []
+        self.vecs: list[list[float]] = []
+        self.meta: list[dict] = []
+
+    def add(self, id_: str, vec: Sequence[float], **meta: object) -> None:
+        if len(vec) != self.dim:
+            raise ValueError(f"expected dim {self.dim}, got {len(vec)}")
+        self.ids.append(id_)
+        self.vecs.append(l2_normalise(vec))
+        self.meta.append(dict(meta))
+
+    def search(self, query: Sequence[float], k: int = 5,
+               where: object = None) -> list[tuple[str, float]]:
+        """Top-k by cosine. `where` PRE-filters (filter then rank), which is the correct order:
+        post-filtering a top-k can return fewer than k results, or none at all."""
+        q = l2_normalise(query)
+        cand: Iterable[int] = range(len(self.vecs))
+        if where is not None:
+            cand = (i for i in cand if where(self.meta[i]))       # type: ignore[operator]
+        scored = ((round(dot(q, self.vecs[i]), 12), self.ids[i]) for i in cand)
+        # nlargest is O(n log k); ties broken by id for determinism
+        top = heapq.nlargest(k, scored, key=lambda sv: (sv[0], sv[1]))
+        return [(i, s) for s, i in top]
+
+    def cost_note(self, n_queries: int = 1) -> str:
+        flops = len(self.vecs) * self.dim * 2 * n_queries
+        return (f"{len(self.vecs)} x {self.dim} brute force = "
+                f"{flops/1e6:.1f}M multiply-adds for {n_queries} query(s)")
+
+
+# ---------------------------------------------------------------- worked example
+DOCS = {
+    "d1": ("model deployment on sagemaker endpoints", [0.9, 0.1, 0.05, 0.0]),
+    "d2": ("sagemaker inference latency tuning",      [0.85, 0.2, 0.1, 0.0]),
+    "d3": ("xgboost hyperparameter search",           [0.1, 0.9, 0.1, 0.0]),
+    "d4": ("gradient boosting feature importance",    [0.05, 0.85, 0.2, 0.0]),
+    "d5": ("kafka consumer group rebalancing",        [0.0, 0.05, 0.95, 0.1]),
+    "d6": ("airflow dag scheduling",                  [0.0, 0.0, 0.1, 0.95]),
+}
+
+
+def test_cosine_properties() -> None:
+    assert abs(cosine([1, 0], [1, 0]) - 1.0) < 1e-12        # identical direction
+    assert abs(cosine([1, 0], [0, 1])) < 1e-12              # orthogonal
+    assert abs(cosine([1, 0], [-1, 0]) + 1.0) < 1e-12       # opposite
+    assert abs(cosine([1, 2, 3], [2, 4, 6]) - 1.0) < 1e-12  # scale invariant: the whole point
+    assert cosine([0, 0], [1, 1]) == 0.0                    # zero vector, no exception
+    try:
+        cosine([1, 2], [1, 2, 3])
+        raise AssertionError("dimension mismatch must raise")
+    except ValueError:
+        pass
+
+
+def test_topk_ranking_and_worked_example() -> None:
+    idx = BruteForceIndex(dim=4)
+    for did, (text, vec) in DOCS.items():
+        idx.add(did, vec, text=text, topic=text.split()[0])
+    query = [0.88, 0.15, 0.05, 0.0]                          # "deploying models on sagemaker"
+    hits = idx.search(query, k=3)
+    assert [h[0] for h in hits] == ["d1", "d2", "d4"] or [h[0] for h in hits][:2] == ["d1", "d2"]
+    assert hits[0][1] > 0.99 and hits[0][1] >= hits[1][1] >= hits[2][1]
+    print("  query = 'deploying models on sagemaker'")
+    for did, score in hits:
+        print(f"    {score:.4f}  {did}  {DOCS[did][0]}")
+    print(f"  {idx.cost_note()}")
+
+
+def test_prefilter_beats_postfilter() -> None:
+    idx = BruteForceIndex(dim=4)
+    for did, (text, vec) in DOCS.items():
+        idx.add(did, vec, text=text, topic=text.split()[0])
+    query = [0.88, 0.15, 0.05, 0.0]
+    pre = idx.search(query, k=2, where=lambda m: m["topic"] in ("kafka", "airflow"))
+    assert len(pre) == 2 and {h[0] for h in pre} == {"d5", "d6"}   # still returns k
+    post = [h for h in idx.search(query, k=2)
+            if DOCS[h[0]][0].split()[0] in ("kafka", "airflow")]
+    assert post == []                     # post-filtering a top-2 returned nothing at all
+    print(f"  pre-filter -> {[h[0] for h in pre]}, post-filter -> {post} (the classic RAG bug)")
+
+
+def test_matches_a_full_sort_and_is_cheaper() -> None:
+    rng = random.Random(7)
+    dim, n, k = 64, 4000, 10
+    idx = BruteForceIndex(dim)
+    for i in range(n):
+        idx.add(f"v{i}", [rng.gauss(0, 1) for _ in range(dim)])
+    q = [rng.gauss(0, 1) for _ in range(dim)]
+    fast = idx.search(q, k=k)
+    qn = l2_normalise(q)
+    slow = sorted(((dot(qn, v), i) for i, v in zip(idx.ids, idx.vecs)),
+                  key=lambda sv: (-sv[0], sv[1]))[:k]
+    assert [i for _s, i in slow] == [i for i, _s in fast]
+    assert all(abs(a[1] - b[0]) < 1e-9 for a, b in zip(fast, slow))
+    print(f"  {n}x{dim}: nlargest(k={k}) matches a full sort exactly; {idx.cost_note()}")
+
+
+def test_normalised_dot_equals_cosine() -> None:
+    rng = random.Random(3)
+    a = [rng.gauss(0, 1) for _ in range(32)]
+    b = [rng.gauss(0, 1) for _ in range(32)]
+    assert abs(dot(l2_normalise(a), l2_normalise(b)) - cosine(a, b)) < 1e-12
+
+
+def test_production_scale_math() -> None:
+    """The number you quote when someone asks 'why not just loop?'"""
+    n, d, per_query_flops = 1_000_000, 768, None
+    per_query_flops = n * d * 2
+    print(f"  1M x 768 brute force = {per_query_flops/1e6:.0f}M multiply-adds PER QUERY "
+          f"-> seconds in Python, ~0.3 GB just to hold float32 vectors")
+    assert per_query_flops > 1e9
+
+
+for t in (test_cosine_properties, test_topk_ranking_and_worked_example,
+          test_prefilter_beats_postfilter, test_matches_a_full_sort_and_is_cheaper,
+          test_normalised_dot_equals_cosine, test_production_scale_math):
+    t()
+print("6.16 cosine / top-k: all tests passed")
+```
+
+#### Complexity
+Normalise at insert: `O(d)` once per vector. Search: `O(n·d)` for the dot products plus `O(n log k)`
+for the selection, `O(k)` extra space. Sorting everything instead would be `O(n·d + n log n)` time and
+`O(n)` space. The dominant term is `n·d` regardless — selection is not the bottleneck, the distance
+computation is, which is exactly why ANN indexes attack `n` (fewer candidates) and quantisation
+attacks `d` (cheaper distances).
+
+#### Follow-ups
+- **"When does brute force stop being fine?"** Roughly: exact brute force in NumPy is fine to a few
+  hundred thousand vectors at interactive latency; in pure Python, a few thousand. Above that, HNSW
+  (fast, high recall, memory-hungry, awkward to update) or IVF-PQ (compressed, tunable, needs
+  training). Both are **approximate** — you trade recall for latency and must measure recall@k
+  against a brute-force ground truth, which is the one experiment people skip.
+- **"Cosine vs dot vs L2."** On normalised vectors, cosine ranking, dot ranking and L2 ranking are
+  all equivalent (`|a-b|² = 2 - 2·cos`). On unnormalised vectors they are not, and dot product
+  silently favours long vectors. Most embedding models expect cosine — check the model card rather
+  than assuming.
+- **"Pre-filter vs post-filter."** The test above is the bug in miniature: post-filtering a top-k can
+  return nothing. pgvector with a `WHERE` clause can fall back to a scan; FAISS needs an `IDSelector`
+  or per-tenant indexes. Decide this deliberately.
+- **"Diversity."** Top-k by pure similarity returns five paraphrases of the same chunk. MMR
+  (maximal marginal relevance) trades relevance against novelty: `score = λ·sim(q,d) − (1−λ)·max
+  sim(d, already_selected)`.
+
+#### Anchor to my experience
+> **Say it like this:** "My hands-on vector work is pgvector, FAISS, Chroma and Pinecone — that's the
+> honest list. On the ResMed RAG medical-report pipeline the retrieval was hybrid, vector plus
+> metadata, under HIPAA-class constraints, and the metadata half is where the pre-filter question I
+> just showed becomes a compliance question rather than a quality one: you cannot post-filter your
+> way out of returning another patient's chunk. I should be clear that I have not used Databricks
+> Vector Search in production — my Databricks depth is Azure Databricks with Spark and Deequ — so if
+> that is the stack here I would be picking it up, but the retrieval concepts transfer directly."
+
+---
+
+### 6.17 Ninety-second recap: what to say when you get stuck
+
+| Situation in the pad | The sentence that buys you credit |
+|---|---|
+| You do not know the optimal approach | "Let me get a correct brute force down first and then optimise — I'd rather have something running at minute 10." |
+| You realise your approach is wrong mid-way | "I've just realised this breaks when the input is out of order. Rather than patch it, let me change the structure — it's a two-line change to buffer by key." |
+| Asked for a complexity you are unsure of | "The loop is O(n·d); the selection is O(n log k). The dominant term is n·d, so the optimisation worth doing is reducing candidates, not the sort." |
+| Asked something you have not used | "I haven't run that in production — my hands-on there is X. Here's how I'd approach it, and here's what I'd want to verify before committing to it." |
+| You have time left | "Let me add the failure test — the happy path is the easy half." |
+| Asked "would you ship this?" | "Not yet: it needs a metric on the queue depth, a timeout on the outbound call, and a test for the poison record. Those are the three I'd add before merging." |
+
+Three things to do in the last five minutes of the round, unprompted:
+
+1. **Run the tests one more time** so the last thing on the screen is green output.
+2. **Name one thing you would change for production** — a metric, a bound, a config knob. It shows
+   you know the difference between an interview answer and a shipped one.
+3. **Ask one question about their stack** that follows from what you just built: how they handle
+   train/serve parity, or what their retry story looks like across the Databricks and AWS halves of
+   the platform. It converts a test into a conversation.
 
 ---
 
