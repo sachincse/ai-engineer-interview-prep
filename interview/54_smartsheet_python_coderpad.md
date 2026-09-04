@@ -135,7 +135,7 @@ Four facts on the calendar item decide everything about how you spend this hour:
 
 | Signal on the invite | What it actually means |
 | --- | --- |
-| **CoderPad link** (`app.coderpad.io/FT4ZGGKY`) | Server-side execution. You will be **running** code, not describing it. Output is public to the room. |
+| **CoderPad link** (`app.coderpad.io/[link removed]`) | Server-side execution. You will be **running** code, not describing it. Output is public to the room. |
 | **"COMPETENCY ASSIGNMENT: Python"** | The scoring rubric is *the language*, not the domain. Someone will tick boxes named "writes idiomatic Python", "handles edge cases", "reasons about complexity", "debugs under pressure". |
 | **60 minutes, Zoom, recorded** | Two to three artefacts maximum. There is no time for a 45-minute masterpiece. Pace is a graded dimension. |
 | **Senior AI/ML Ops Engineer** seat | They are not hiring an algorithms competitor. They are checking that a platform person still has *hands*. |
@@ -558,11 +558,11 @@ Three of these deserve a sentence more.
 | Item | Value |
 | --- | --- |
 | Time | **15:00 - 16:00 IST, today (2026-09-02)** |
-| CoderPad | **https://app.coderpad.io/FT4ZGGKY** |
-| Zoom | **https://smartsheet.zoom.us/j/97180001239** |
-| Zoom password | **881569** |
-| Zoom meeting ID | **971 8000 1239** |
-| Host | **Priti Mudi** (Smartsheet) |
+| CoderPad | **https://app.coderpad.io/[link removed]** |
+| Zoom | **https://[zoom link removed] id removed]** |
+| Zoom password | **[passcode removed]** |
+| Zoom meeting ID | **[meeting id removed]** |
+| Host | **the interview coordinator** (Smartsheet) |
 | Recording | **Yes — joining the call is your consent.** Assume every keystroke and every word is retained and reviewable |
 
 **T-90 to T-30 (13:30-14:30):**
@@ -580,7 +580,7 @@ Three of these deserve a sentence more.
 - Phone face down, silent, out of arm's reach.
 
 **T-15 to T-5 (14:45-14:55) — the pad:**
-- Open **https://app.coderpad.io/FT4ZGGKY**. Confirm it loads and that the language selector says **Python 3**.
+- Open **https://app.coderpad.io/[link removed]**. Confirm it loads and that the language selector says **Python 3**.
 - Run the §1.4.2 smoke test. Confirm `print("hello")` returns, note `sys.version`, note whether numpy/pandas exist.
 - Confirm your Run keyboard shortcut works (**Ctrl+Enter**).
 - **Delete the smoke test.** Leave the pad empty.
@@ -1529,7 +1529,7 @@ product company, because that is consistent across the category:
    like a senior (state it, propose how you'd find out, move on).
 
 **Practical notes for today:** it is a recorded Zoom + CoderPad session with an India-based host
-(Priti Mudi coordinating). Expect either an India-based engineer or a Bellevue engineer at an odd
+(the interview coordinator coordinating). Expect either an India-based engineer or a Bellevue engineer at an odd
 hour — if it is the latter, be efficient and respect their clock. Confirm hybrid expectations
 (days in office per week) as part of your closing questions rather than mid-interview.
 
@@ -17884,7 +17884,7 @@ and a security control you cannot enumerate tests for is not a control.
 
 ### 8.4 The consistency sheet — numbers already on record
 
-Everything in this table has **already been stated in writing** to Talentiser (Shweta Kandpal) and
+Everything in this table has **already been stated in writing** to the recruiting agency (the sourcing recruiter) and
 forwarded to Smartsheet. The interviewer may or may not have seen it; the recruiter certainly has. If
 you say a different number today, the mismatch surfaces at debrief, and a number that moves is read as a
 number that was never true.
@@ -17899,8 +17899,8 @@ number that was never true.
 | Python | **8 years** | "Python for the whole eight — it is my primary language." |
 | Cloud | **~5 years** (AWS primary, Azure ~1.5) | "About five years of cloud, AWS primary, roughly a year and a half of Azure." |
 | Databricks | **~1.5 years** (Azure Databricks + Spark + Deequ **only**) | "Around a year and a half, on Azure Databricks — Spark and Deequ. Not Unity Catalog." |
-| Current CTC | **Rs 55L fixed** | "Fifty-five lakhs fixed." |
-| Expected CTC | **Rs 75L fixed** | "Seventy-five lakhs fixed." |
+| Current CTC | **Rs [current CTC — private] fixed** | "Fifty-five lakhs fixed." |
+| Expected CTC | **Rs [expected CTC — private] fixed** | "Seventy-five lakhs fixed." |
 | Notice period | **60 days**, buyout discussable | "Sixty days; buyout is discussable if timing matters." |
 | Offer in hand | **None** | "No offer in hand — I'm not running a parallel process I need to time against." |
 | Location | **Bengaluru**; hybrid is fine | "I'm in Bengaluru. Hybrid at Infantry Road works for me." |
@@ -18199,7 +18199,7 @@ stable. Have the answer ready so you do not improvise.
 **Default move: acknowledge, give the number if pressed, hand it back to the recruiter.** Do not refuse
 to answer — evasiveness about a number already on record reads as if the number is about to change.
 
-> **Say it like this (the deflection):** "Shweta at Talentiser has my numbers and they haven't moved —
+> **Say it like this (the deflection):** "the sourcing recruiter at the recruiting agency has my numbers and they haven't moved —
 > current is fifty-five lakhs fixed, and I'm targeting seventy-five fixed. Happy to leave the detail with
 > her so we can use the rest of the time on the technical side."
 
@@ -18216,7 +18216,7 @@ to answer — evasiveness about a number already on record reads as if the numbe
 
 | Do | Do not |
 |---|---|
-| Say **55 fixed / 75 fixed** — the numbers already on record | Inflate current CTC; background verification checks it |
+| Say **[current CTC — private] / [expected CTC — private]** — the numbers already on record | Inflate current CTC; background verification checks it |
 | Say "fixed", so nobody assumes you mean total with variable | Quote a total-comp figure that silently includes variable |
 | Say **60 days, buyout discussable** | Promise a shorter notice you cannot deliver |
 | Say **no offer in hand** | Invent a competing offer for leverage — it is checkable and it ends processes |
@@ -19450,7 +19450,7 @@ you cannot verify.
 |---|---|
 | 1 | **Senior AI/ML Ops Engineer**, India GCC in **Bangalore (Infantry Road), hybrid** — this is a build-out team, so expect questions about setting up platform foundations, not just maintaining them. |
 | 2 | The JD leans **Databricks + AWS**: Unity Catalog, Mosaic AI Agent Framework, Databricks Vector Search, data observability (Monte Carlo), and Bedrock are named. You have already disclosed in writing which of those you have not touched — do not re-litigate it, and do not soften it either. |
-| 3 | Sourced via **Talentiser (Shweta Kandpal)**; today is a **live CoderPad Python competency round** on Zoom, hosted by **Priti Mudi**, recorded. It is a *coding* screen, not an ML-theory screen — so optimise for clean, tested, narrated Python. |
+| 3 | Sourced via **the recruiting agency (the sourcing recruiter)**; today is a **live CoderPad Python competency round** on Zoom, hosted by **the interview coordinator**, recorded. It is a *coding* screen, not an ML-theory screen — so optimise for clean, tested, narrated Python. |
 
 Bridging line if they ask why you fit despite the tool gaps:
 
@@ -19476,8 +19476,8 @@ Consistency is the whole game here. One row, memorised.
 | Python | **8 years** |
 | Cloud | **~5 years** — AWS primary, Azure ~1.5 |
 | Databricks | **~1.5 years** — Azure Databricks + Spark + Deequ only |
-| Current CTC | **₹55L fixed** |
-| Expected | **₹75L fixed** |
+| Current CTC | **[current CTC — private]** |
+| Expected | **[expected CTC — private]** |
 | Notice | **60 days**, buyout discussable |
 | Offers in hand | **None** |
 | Location | Bengaluru; the role is Bangalore hybrid — no relocation issue |
@@ -19491,7 +19491,7 @@ If the "8 years vs 6 years" framing is challenged, reconcile it in one breath an
 
 On compensation, if it comes up in a coding round (it shouldn't, but recruiters chain calls):
 
-> **Say it like this:** "Currently ₹55 lakh fixed, targeting ₹75 lakh fixed. Notice is 60 days and
+> **Say it like this:** "Currently [current CTC — private]akh fixed, targeting [expected CTC — private]akh fixed. Notice is 60 days and
 > a buyout is discussable. Happy to be flexible on structure; the fixed component is what I'm
 > anchored on."
 
@@ -19546,11 +19546,11 @@ a coding round is a senior move and often gets you a genuinely useful answer.
 
 Do these in order. Stop reading this document when the list is done.
 
-- [ ] **CoderPad open** at `https://app.coderpad.io/FT4ZGGKY`, language set to **Python 3**, and
+- [ ] **CoderPad open** at `https://app.coderpad.io/[link removed]`, language set to **Python 3**, and
       the warm-up block from §9.1 **already pasted and Run once** — you know the version and you
       know the pad executes.
-- [ ] **Zoom joined**, meeting **password `881569`** entered, **camera and mic tested**, host is
-      **Priti Mudi**. Join two minutes early and sit in the waiting room rather than arriving late.
+- [ ] **Zoom joined**, meeting **password `[passcode removed]`** entered, **camera and mic tested**, host is
+      **the interview coordinator**. Join two minutes early and sit in the waiting room rather than arriving late.
 - [ ] **Screen-share rehearsed once** — share the *browser tab*, not the whole desktop, so nothing
       personal is visible. Close every other tab that has a notification badge.
 - [ ] **Notifications OFF everywhere** — Windows Focus Assist / Do Not Disturb on, Slack and
@@ -19569,8 +19569,8 @@ Do these in order. Stop reading this document when the list is done.
 - [ ] **Bathroom, before**, not at minute 35.
 - [ ] **Room and light checked** — face lit from the front, door closed, anyone else at home told
       it's a 60-minute interview.
-- [ ] **Backup path ready**: phone hotspot on standby, and the recruiter's number (Shweta Kandpal,
-      Talentiser) reachable in one tap if the link fails. If you drop, rejoin first and apologise
+- [ ] **Backup path ready**: phone hotspot on standby, and the recruiter's number (the sourcing recruiter,
+      the recruiting agency) reachable in one tap if the link fails. If you drop, rejoin first and apologise
       second.
 - [ ] **One deep breath, then this sentence in your head**: *ask, type, test, narrate.* Brute force
       first, complexity out loud, tests before you're asked. That's the whole hour.
